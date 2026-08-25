@@ -1,0 +1,14 @@
+node_modules/
+web/dist/
+server/dist/
+data/
+*.log
+.DS_Store
+
+# android
+android/build/
+android/app/build/
+android/local.properties
+android/.gradle/
+android/app/src/main/res/drawable*/*
+scripts/shots/
