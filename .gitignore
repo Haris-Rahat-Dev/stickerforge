@@ -12,3 +12,11 @@ android/local.properties
 android/.gradle/
 android/app/src/main/res/drawable*/*
 scripts/shots/
+
+# editor / IDE
+.cursor/
+.idea/
+.vscode/
+.project
+.classpath
+.settings/
