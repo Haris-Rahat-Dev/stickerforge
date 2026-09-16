@@ -1,8 +1,19 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { CropRect, QualityAssessment, VideoMeta } from './types.js'
+import type { CropRect, MediaKind, QualityAssessment, VideoMeta } from './types.js'
 
 const execFileAsync = promisify(execFile)
+
+// Still-image codecs → treated as images (become motionless animated WebP). GIF and
+// animated WebP go through the video path so their motion survives.
+const STILL_CODECS = new Set(['png', 'mjpeg', 'jpeg', 'bmp', 'tiff'])
+
+export async function probeMedia(filePath: string): Promise<{ meta: VideoMeta; kind: MediaKind }> {
+  const meta = await probeVideo(filePath)
+  const kind: MediaKind = STILL_CODECS.has(meta.codec) ? 'image' : 'video'
+  if (kind === 'image') return { meta: { ...meta, fps: 0, duration: 0, hasAudio: false }, kind }
+  return { meta, kind }
+}
 
 export async function probeVideo(filePath: string): Promise<VideoMeta> {
   const { stdout } = await execFileAsync('ffprobe', [
@@ -46,7 +57,7 @@ export async function probeVideo(filePath: string): Promise<VideoMeta> {
   }
 }
 
-export function assessQuality(meta: VideoMeta): QualityAssessment {
+export function assessQuality(meta: VideoMeta, kind: MediaKind = 'video'): QualityAssessment {
   const notes: QualityAssessment['notes'] = []
   let level: QualityAssessment['level'] = 'good'
 
@@ -59,6 +70,12 @@ export function assessQuality(meta: VideoMeta): QualityAssessment {
     notes.push({ type: 'info', msg: `Modest resolution (${meta.width}×${meta.height}) — acceptable` })
   } else {
     notes.push({ type: 'good', msg: `Sharp source (${meta.width}×${meta.height})` })
+  }
+
+  // Images have no fps/duration/audio — skip those checks.
+  if (kind === 'image') {
+    notes.push({ type: 'info', msg: 'Still image — becomes a motionless sticker' })
+    return { level, notes }
   }
 
   if (meta.fps < 20) {

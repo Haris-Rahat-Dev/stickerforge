@@ -27,6 +27,35 @@ function run(bin: string, args: string[]): Promise<void> {
 }
 
 /**
+ * A still image → motionless animated WebP: frame it to 512×512, then mux two
+ * identical frames so it counts as animated (WhatsApp rejects a static sticker in
+ * an animated pack). Bypasses VP9 entirely — libvpx can spin forever on a looped
+ * still — so it's deterministic and fast.
+ */
+export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult> {
+  const { inputPath, outPath, fit, padColor, crop, cropPos, border } = opts
+  const tmp = fs_mkdtemp()
+  await mkdir(tmp, { recursive: true })
+  try {
+    const cropF = crop ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` : ''
+    const filters = buildFilters(fit, padColor, cropPos, border)
+    const png = path.join(tmp, 'f.png')
+    const webp = path.join(tmp, 'f.webp')
+    await run('ffmpeg', ['-y', '-i', inputPath, '-vf', `${cropF}${filters}`, '-frames:v', '1', png])
+    // A still is tiny; the ladder is just headroom under WhatsApp's 500KB cap.
+    for (const q of [90, 75, 60, 45]) {
+      await run('cwebp', [png, '-q', String(q), '-quiet', '-o', webp])
+      await run('webpmux', ['-frame', webp, '+250', '-frame', webp, '+250', '-loop', '0', '-o', outPath])
+      const { size } = await stat(outPath)
+      if (size <= 480 * 1024) return { sizeBytes: size, frames: 2 }
+    }
+    return { sizeBytes: (await stat(outPath)).size, frames: 2 }
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+}
+
+/**
  * Animated WebP for WhatsApp third-party sticker packs (the provider API
  * requires animated WebP, not WebM). Pipeline:
  *   ffmpeg frame extraction → cwebp per-frame → webpmux assembly

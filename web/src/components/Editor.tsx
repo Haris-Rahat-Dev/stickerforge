@@ -29,6 +29,7 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
+    if (file.kind === 'image') return   // no timeline for stills
     let url: string | null = null
     let cancelled = false
     filmstripUrl(file.id).then(u => {
@@ -117,6 +118,7 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
   const reset = (): void => { setJob(null); setJobId(null) }
 
   const tall = meta.height > meta.width
+  const isImage = file.kind === 'image'
   const qualityChip = QUALITY[file.quality.level] ?? QUALITY.ok
 
   return (
@@ -126,7 +128,9 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
           <div>
             <h2 title={file.originalName}>{file.originalName}</h2>
             <span className="meta-line">
-              {meta.width}×{meta.height} · {Math.round(meta.fps)}fps · {meta.duration.toFixed(1)}s · {(file.sizeBytes / 1024 / 1024).toFixed(1)}MB{meta.hasAudio ? ' · 🔊 audio (will be stripped)' : ''}
+              {isImage
+                ? `image · ${meta.width}×${meta.height} · ${(file.sizeBytes / 1024).toFixed(0)}KB`
+                : `${meta.width}×${meta.height} · ${Math.round(meta.fps)}fps · ${meta.duration.toFixed(1)}s · ${(file.sizeBytes / 1024 / 1024).toFixed(1)}MB${meta.hasAudio ? ' · 🔊 audio (will be stripped)' : ''}`}
             </span>
           </div>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -151,25 +155,33 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
                   style={fit === 'contain' ? { background: padColor } : undefined}
                 >
                   <div style={frameStyle(fit, meta, activeCrop, cropPos)}>
-                    <video
-                      ref={videoRef}
-                      src={videoUrl(file.id)}
-                      controls muted playsInline preload="auto"
-                      style={videoStyle(meta, activeCrop)}
-                    />
+                    {isImage ? (
+                      <img src={videoUrl(file.id)} style={videoStyle(meta, activeCrop)} alt={file.originalName} />
+                    ) : (
+                      <video
+                        ref={videoRef}
+                        src={videoUrl(file.id)}
+                        controls muted playsInline preload="auto"
+                        style={videoStyle(meta, activeCrop)}
+                      />
+                    )}
                   </div>
                   {fit === 'cover' && cropOverlays(meta, activeCrop, cropPos).map((s, i) => (
                     <div key={i} className="crop-dim" style={s} />
                   ))}
                 </div>
               </div>
-              <Timeline duration={duration} start={start} end={end} stripUrl={stripUrl} maxSpan={maxSpan} onChange={setRange} />
-              <div className="trim-tools">
-                <button className={`btn btn-ghost btn-sm ${loopTrim ? 'active' : ''}`} onClick={() => setLoopTrim(!loopTrim)}>
-                  {loopTrim ? '⏹ Stop loop' : '▶ Loop trim'}
-                </button>
-                <span className="out-dur">Output: <b>{outDur.toFixed(2)}s</b> @ {fps}fps</span>
-              </div>
+              {!isImage && (
+                <>
+                  <Timeline duration={duration} start={start} end={end} stripUrl={stripUrl} maxSpan={maxSpan} onChange={setRange} />
+                  <div className="trim-tools">
+                    <button className={`btn btn-ghost btn-sm ${loopTrim ? 'active' : ''}`} onClick={() => setLoopTrim(!loopTrim)}>
+                      {loopTrim ? '⏹ Stop loop' : '▶ Loop trim'}
+                    </button>
+                    <span className="out-dur">Output: <b>{outDur.toFixed(2)}s</b> @ {fps}fps</span>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="controls-col">
@@ -223,18 +235,22 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
                 {border ? '⬜ White border on' : '⬜ White border (safe zone)'}
               </button>
 
-              <label className="ctl-label">Speed — squeeze long moments into 6s</label>
-              <div className="speed-row">
-                <input type="range" min={0.25} max={4} step={0.25} value={speed} onChange={e => changeSpeed(parseFloat(e.target.value))} />
-                <span className="speed-val">{speed}×</span>
-              </div>
+              {!isImage && (
+                <>
+                  <label className="ctl-label">Speed — squeeze long moments into 6s</label>
+                  <div className="speed-row">
+                    <input type="range" min={0.25} max={4} step={0.25} value={speed} onChange={e => changeSpeed(parseFloat(e.target.value))} />
+                    <span className="speed-val">{speed}×</span>
+                  </div>
 
-              <label className="ctl-label">Frame rate</label>
-              <select value={fps} onChange={e => setFps(parseInt(e.target.value, 10))}>
-                {fpsOptions(meta.fps).map(f => <option key={f} value={f}>{f} fps</option>)}
-              </select>
+                  <label className="ctl-label">Frame rate</label>
+                  <select value={fps} onChange={e => setFps(parseInt(e.target.value, 10))}>
+                    {fpsOptions(meta.fps).map(f => <option key={f} value={f}>{f} fps</option>)}
+                  </select>
+                </>
+              )}
 
-              <div className="spec-hint">→ WebM/VP9 · 512×512 · ≤30fps · ≤6s · &lt;500KB · silent</div>
+              <div className="spec-hint">{isImage ? '→ still → motionless animated WebP · 512×512' : '→ WebM/VP9 · 512×512 · ≤30fps · ≤6s · <500KB · silent'}</div>
 
               <button className="btn btn-primary convert-btn" disabled={!!job && job.status === 'running'} onClick={doConvert}>
                 {job?.status === 'running' ? `Encoding… ${Math.round((job.progress || 0) * 100)}%` : '⚡ Add to pack'}

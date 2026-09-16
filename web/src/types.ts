@@ -32,8 +32,11 @@ export interface CropRect {
 
 export type FitMode = 'cover' | 'contain' | 'stretch'
 
+export type MediaKind = 'video' | 'image'
+
 export interface FileRecord {
   id: string
+  kind: MediaKind
   originalName: string
   sizeBytes: number
   meta: VideoMeta

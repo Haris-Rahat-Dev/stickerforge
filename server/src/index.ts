@@ -4,9 +4,9 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { probeVideo, assessQuality, detectCrop } from './probe.js'
+import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { convertToSticker, computeBitrateKbps, extractTray } from './convert.js'
-import { convertToAnimatedWebp } from './webp.js'
+import { convertToAnimatedWebp, imageToAnimatedWebp } from './webp.js'
 import { createLimiter } from './queue.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
   createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion } from './db.js'
@@ -96,9 +96,24 @@ function clampPos(pos: unknown): number {
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.5
 }
 
+// Still images loop into a tiny clip (a few identical frames) so they become a
+// motionless — but technically animated — WebP that WhatsApp accepts in an
+// animated pack.
+const IMAGE_DUR = 1
+const IMAGE_FPS = 4
+
 function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertSettings {
   const duration = rec.meta.duration
   const fit = ['cover', 'contain', 'stretch'].includes(String(body.fit)) ? body.fit as FitMode : 'cover'
+  if (rec.kind === 'image') {
+    return {
+      start: 0, end: IMAGE_DUR, speed: 1, fps: IMAGE_FPS, fit,
+      padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
+      crop: sanitizeCrop(body.crop as Partial<CropRect> | null, rec.meta),
+      cropPos: clampPos(body.cropPos),
+      border: !!body.border
+    }
+  }
   return {
     start: Math.max(0, Number(body.start) || 0),
     end: Math.min(Number(body.end) || Math.min(6, duration), duration || 6),
@@ -115,16 +130,17 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) { res.status(400).json({ error: 'No file provided' }); return }
-    const meta = await probeVideo(req.file.path)
+    const { meta, kind } = await probeMedia(req.file.path)
     const id = req.file.filename
     const record: FileRecord = {
       id,
       owner: req.userId,
+      kind,
       originalName: Buffer.from(req.file.originalname, 'latin1').toString('utf8'),
       path: req.file.path,
       sizeBytes: req.file.size,
       meta,
-      quality: assessQuality(meta)
+      quality: assessQuality(meta, kind)
     }
     files.set(id, record)
     saveFile(record)
@@ -169,10 +185,18 @@ function streamFile(req: express.Request, res: express.Response, filePath: strin
   }
 }
 
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif', '.tiff': 'image/tiff'
+}
 app.get('/api/video/:id', (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
-  streamFile(req, res, rec.path, rec.id.endsWith('.webm') ? 'video/webm' : 'video/mp4')
+  const ext = path.extname(rec.path).toLowerCase()
+  const mime = rec.kind === 'image'
+    ? (IMAGE_MIME[ext] || 'application/octet-stream')
+    : (rec.id.endsWith('.webm') ? 'video/webm' : 'video/mp4')
+  streamFile(req, res, rec.path, mime)
 })
 
 app.get('/api/filmstrip/:id', async (req, res) => {
@@ -207,10 +231,13 @@ app.get('/api/cropdetect/:id', async (req, res) => {
 
 function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null): Job {
   const jobId = crypto.randomUUID()
-  const outputPath = path.join(OUTPUTS, `${jobId}.webm`)
+  // Videos become a WebM (re-encoded to WebP at pack build); images become the
+  // motionless animated WebP directly (VP9 can hang on a still).
+  const outputPath = path.join(OUTPUTS, `${jobId}.${rec.kind === 'image' ? 'webp' : 'webm'}`)
   const job: Job = {
     id: jobId,
     owner: rec.owner,
+    kind: rec.kind,
     fileId: rec.id,
     status: 'running',
     progress: 0,
@@ -223,22 +250,26 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
 
   const { start, end, speed, fps, fit, padColor, crop, cropPos, border } = settings
 
+  const task = rec.kind === 'image'
+    ? () => imageToAnimatedWebp({ inputPath: rec.path, outPath: outputPath, start, end, fps, fit, padColor, crop, cropPos, border })
+    : () => convertToSticker(
+        { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
+        signal,
+        p => { job.progress = Math.min(0.99, Math.max(job.progress, p)); job.stage = 'encoding' }
+      )
+
   job.stage = 'queued'
-  encodeQueue.run(() => convertToSticker(
-    { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
-    signal,
-    p => {
-      job.progress = Math.min(0.99, Math.max(job.progress, p))
-      job.stage = 'encoding'
-    }
-  )).then(async ({ sizeBytes }) => {
+  encodeQueue.run(task).then(async ({ sizeBytes }) => {
     const trayPath = path.join(TRAYS, `${jobId}.png`)
     await extractTray(rec.path, trayPath, start, crop, cropPos)
     job.trayPath = fs.existsSync(trayPath) ? trayPath : null
     job.status = 'done'
     job.progress = 1
     job.sizeBytes = sizeBytes
-    job.outMeta = await probeVideo(outputPath).catch(() => null)
+    // Images don't need probing (they're already the final 512 WebP); videos do.
+    job.outMeta = rec.kind === 'image'
+      ? { width: 512, height: 512, fps: 2, duration: 0.5, bitrate: 0, codec: 'webp', pixFmt: 'yuva420p', hasAudio: false, sizeBytes }
+      : await probeVideo(outputPath).catch(() => null)
     saveJob(job)   // only finished jobs are persisted — a running encode can't survive a restart
   }).catch((err: unknown) => {
     if (err instanceof Error && err.name === 'AbortError') {
@@ -295,17 +326,21 @@ app.post('/api/batch', async (req, res) => {
   for (const id of ids) {
     const rec = ownedFile(req, id)
     if (!rec) continue
-    const end = Math.min(6, rec.meta.duration)
-    const fps = Math.min(30, Math.max(10, Math.round(rec.meta.fps)))
 
-    const detected = await detectCrop(rec.path, rec.meta).catch(() => null)
-    const crop = detected && (detected.w < rec.meta.width - 8 || detected.h < rec.meta.height - 8)
-      ? sanitizeCrop(detected, rec.meta)
-      : null
+    let settings: ConvertSettings
+    if (rec.kind === 'image') {
+      settings = { start: 0, end: IMAGE_DUR, speed: 1, fps: IMAGE_FPS, fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false }
+    } else {
+      const end = Math.min(6, rec.meta.duration)
+      const fps = Math.min(30, Math.max(10, Math.round(rec.meta.fps)))
+      const detected = await detectCrop(rec.path, rec.meta).catch(() => null)
+      const crop = detected && (detected.w < rec.meta.width - 8 || detected.h < rec.meta.height - 8)
+        ? sanitizeCrop(detected, rec.meta)
+        : null
+      settings = { start: 0, end, speed: 1, fps, fit: 'cover', padColor: '#000000', crop, cropPos: 0.5, border: false }
+    }
 
-    const job = startJob(rec, {
-      start: 0, end, speed: 1, fps, fit: 'cover', padColor: '#000000', crop, cropPos: 0.5, border: false
-    }, null)
+    const job = startJob(rec, settings, null)
     job.stage = 'queued'
     results.push({ jobId: job.id, fileId: id })
   }
@@ -338,13 +373,15 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
   const stickers: Array<{ image_file: string; emojis: string[] }> = []
   for (const [i, job] of jobList.entries()) {
     const name = `s${i + 1}.webp`
-    const result = await convertToAnimatedWebp({
-      inputPath: job.outputPath,
-      outPath: path.join(packDir, name),
-      ...job.settings,
-      speed: job.settings.speed
-    })
-    console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
+    const outPath = path.join(packDir, name)
+    if (job.kind === 'image') {
+      // Already a motionless animated WebP — just place it.
+      fs.copyFileSync(job.outputPath, outPath)
+      console.log(`pack ${pack.code}: ${name} ← image ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
+    } else {
+      const result = await convertToAnimatedWebp({ inputPath: job.outputPath, outPath, ...job.settings, speed: job.settings.speed })
+      console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
+    }
     stickers.push({ image_file: name, emojis: [PACK_EMOJIS[i % PACK_EMOJIS.length]] })
   }
 

@@ -75,7 +75,8 @@ export default function App() {
 
   const addFiles = async (list: File[]): Promise<void> => {
     for (const f of list) {
-      if (!/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(f.name) && !f.type.startsWith('video/')) continue
+      const ok = /\.(mp4|mov|webm|mkv|avi|m4v|png|jpe?g|webp|bmp|gif)$/i.test(f.name) || f.type.startsWith('video/') || f.type.startsWith('image/')
+      if (!ok) continue
       const key = `${f.name}-${f.size}-${Math.random().toString(36).slice(2)}`
       setUploads(u => [...u, { key, name: f.name, progress: 0 }])
       try {
@@ -253,7 +254,7 @@ export default function App() {
       )}
 
       {dragOver && <div className="drop-overlay"><div>⬇ Drop videos to import</div></div>}
-      <input ref={inputRef} type="file" accept="video/*,.mkv" multiple hidden onChange={e => { addFiles([...e.target.files!]); e.target.value = '' }} />
+      <input ref={inputRef} type="file" accept="video/*,image/*,.mkv" multiple hidden onChange={e => { addFiles([...e.target.files!]); e.target.value = '' }} />
       {editing && (
         <Editor
           file={editing}
@@ -365,16 +366,21 @@ function FileCard({ file, encoding, error, encoded, inPack, onEdit, onAdd, onRem
   const vidRef = useRef<HTMLVideoElement>(null)
   const q = QUALITY[file.quality.level]
   const status = encoding != null ? 'encoding' : error ? 'error' : inPack ? 'inpack' : encoded ? 'encoded' : 'review'
+  const isImage = file.kind === 'image'
 
   return (
     <div className={`card status-${status}`}>
-      <div className="thumb square" onClick={onEdit} title="Click to fine-tune framing, trim, speed">
-        <video
-          ref={vidRef} className="thumb-cover" src={`${videoUrl(file.id)}#t=0.1`}
-          muted loop playsInline preload="metadata"
-          onMouseEnter={() => vidRef.current?.play().catch(() => {})}
-          onMouseLeave={() => { const v = vidRef.current; if (v) { v.pause(); v.currentTime = 0.1 } }}
-        />
+      <div className="thumb square" onClick={onEdit} title={isImage ? 'Click to fine-tune framing' : 'Click to fine-tune framing, trim, speed'}>
+        {isImage ? (
+          <img className="thumb-cover" src={videoUrl(file.id)} alt={file.originalName} />
+        ) : (
+          <video
+            ref={vidRef} className="thumb-cover" src={`${videoUrl(file.id)}#t=0.1`}
+            muted loop playsInline preload="metadata"
+            onMouseEnter={() => vidRef.current?.play().catch(() => {})}
+            onMouseLeave={() => { const v = vidRef.current; if (v) { v.pause(); v.currentTime = 0.1 } }}
+          />
+        )}
         <span className={`chip chip-${file.quality.level}`}>{q.label}</span>
         <span className={`status-chip ${status}`}>{STATUS_LABEL[status]}</span>
         <button className="icon-btn remove" onClick={e => { e.stopPropagation(); onRemove() }}>✕</button>
@@ -382,7 +388,7 @@ function FileCard({ file, encoding, error, encoded, inPack, onEdit, onAdd, onRem
       </div>
       <div className="card-body">
         <div className="card-name" title={file.originalName}>{file.originalName}</div>
-        <div className="meta-line">{file.meta.width}×{file.meta.height} · {Math.round(file.meta.fps)}fps · {file.meta.duration.toFixed(1)}s</div>
+        <div className="meta-line">{isImage ? `image · ${file.meta.width}×${file.meta.height}` : `${file.meta.width}×${file.meta.height} · ${Math.round(file.meta.fps)}fps · ${file.meta.duration.toFixed(1)}s`}</div>
         {error && <div className="warn-line">✗ {error}</div>}
         <div className="card-actions">
           {status === 'review' && <button className="btn btn-primary btn-sm" onClick={onAdd}>＋ Add to pack</button>}

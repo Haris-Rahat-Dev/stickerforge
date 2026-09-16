@@ -44,9 +44,12 @@ export interface ConvertSettings {
   border: boolean
 }
 
+export type MediaKind = 'video' | 'image'
+
 export interface FileRecord {
   id: string
   owner: string
+  kind: MediaKind
   originalName: string
   path: string
   sizeBytes: number
@@ -69,6 +72,7 @@ export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'
 export interface Job {
   id: string
   owner: string
+  kind: MediaKind
   fileId: string
   status: JobStatus
   progress: number
