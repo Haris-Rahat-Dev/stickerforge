@@ -42,43 +42,50 @@ export async function convertToAnimatedWebp(opts: WebpOptions): Promise<WebpResu
   try {
     const cropF = crop ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` : ''
     const filters = buildFilters(fit, padColor, cropPos, border)
-    await run('ffmpeg', [
-      '-progress', 'pipe:1', '-nostats',
-      '-ss', String(start),
-      '-t', String(outDur + 0.2),
-      '-i', inputPath,
-      '-vf', `${cropF}${filters},setpts=PTS/${speed},fps=${fps}`,
-      '-frames:v', '150',
-      `${framesDir}/f%04d.png`
-    ])
+    // WebP is far heavier than WebM per frame, so quality alone often can't
+    // hit 500KB. Step fps down (fewer frames) too, but never above source fps.
+    const fpsSteps = [fps, 20, 15, 12, 10, 8].filter((v, i, a) => v <= fps && a.indexOf(v) === i)
+    const qualities = [72, 55, 40, 28, 20]
 
-    const frames = (await readdir(framesDir)).filter(f => f.endsWith('.png')).sort()
-    if (frames.length === 0) throw new Error('no frames extracted')
+    for (const outFps of fpsSteps) {
+      await rm(framesDir, { recursive: true, force: true })
+      await mkdir(framesDir, { recursive: true })
+      await run('ffmpeg', [
+        '-progress', 'pipe:1', '-nostats',
+        '-ss', String(start),
+        '-t', String(outDur + 0.2),
+        '-i', inputPath,
+        '-vf', `${cropF}${filters},setpts=PTS/${speed},fps=${outFps}`,
+        '-frames:v', '150',
+        `${framesDir}/f%04d.png`
+      ])
 
-    const durationMs = Math.max(20, Math.round(1000 / fps))
-    const qualities = [72, 55, 40, 28]
+      const frames = (await readdir(framesDir)).filter(f => f.endsWith('.png')).sort()
+      if (frames.length === 0) throw new Error('no frames extracted')
+      const durationMs = Math.max(20, Math.round(1000 / outFps))
 
-    for (const q of qualities) {
-      for (const f of frames) {
-        await run('cwebp', [
-          path.join(framesDir, f),
-          '-q', String(q),
-          '-quiet',
-          '-o', path.join(framesDir, f.replace('.png', '.webp'))
-        ])
-      }
-      const webpFrames = frames.map(f => path.join(framesDir, f.replace('.png', '.webp')))
-      const muxArgs: string[] = []
-      for (const f of webpFrames) muxArgs.push('-frame', f, `+${durationMs}`)
-      muxArgs.push('-loop', '0', '-o', outPath)
-      await run('webpmux', muxArgs)
+      for (const q of qualities) {
+        for (const f of frames) {
+          await run('cwebp', [
+            path.join(framesDir, f),
+            '-q', String(q),
+            '-quiet',
+            '-o', path.join(framesDir, f.replace('.png', '.webp'))
+          ])
+        }
+        const webpFrames = frames.map(f => path.join(framesDir, f.replace('.png', '.webp')))
+        const muxArgs: string[] = []
+        for (const f of webpFrames) muxArgs.push('-frame', f, `+${durationMs}`)
+        muxArgs.push('-loop', '0', '-o', outPath)
+        await run('webpmux', muxArgs)
 
-      const { size } = await stat(outPath)
-      if (size <= 480 * 1024) {
-        return { sizeBytes: size, frames: frames.length }
+        const { size } = await stat(outPath)
+        if (size <= 480 * 1024) {
+          return { sizeBytes: size, frames: frames.length }
+        }
       }
     }
-    throw new Error(`animated webp exceeds 500KB even at minimum quality (${frames.length} frames)`)
+    throw new Error(`animated webp exceeds 500KB even at ${fpsSteps.at(-1)}fps / min quality`)
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }

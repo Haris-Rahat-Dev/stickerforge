@@ -46,6 +46,7 @@ export interface ConvertSettings {
 
 export interface FileRecord {
   id: string
+  owner: string
   originalName: string
   path: string
   sizeBytes: number
@@ -54,10 +55,20 @@ export interface FileRecord {
   suggestedCrop?: CropRect | null
 }
 
+export interface Pack {
+  code: string
+  owner: string
+  name: string
+  identifier: string
+  version: number
+  jobIds: string[]   // ordered membership (one job per sticker)
+}
+
 export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'
 
 export interface Job {
   id: string
+  owner: string
   fileId: string
   status: JobStatus
   progress: number

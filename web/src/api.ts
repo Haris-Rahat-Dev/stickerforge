@@ -22,6 +22,12 @@ export function uploadFile(file: File, onProgress?: (p: number) => void): Promis
   })
 }
 
+export async function listFiles(): Promise<FileRecord[]> {
+  const res = await fetch(`${BASE}/api/files`)
+  if (!res.ok) return []
+  return res.json()
+}
+
 export async function deleteFile(id: string): Promise<void> {
   await fetch(`${BASE}/api/file/${id}`, { method: 'DELETE' })
 }
@@ -56,16 +62,52 @@ export async function convert(settings: ConvertRequest): Promise<string> {
   return json.jobId as string
 }
 
-export async function batchConvert(fileIds: string[]): Promise<BatchJobInfo[]> {
+// One-tap "Add to pack": reuses the batch endpoint's proven default logic
+// (cropdetect + cover + sensible fps) for a single file. Returns its jobId.
+export async function quickConvert(fileId: string): Promise<string> {
   const res = await fetch(`${BASE}/api/batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileIds })
+    body: JSON.stringify({ fileIds: [fileId] })
   })
   const json = await res.json()
-  if (!res.ok) throw new Error(json.error || 'Batch failed')
+  if (!res.ok) throw new Error(json.error || 'Convert failed')
+  const info = json[0] as BatchJobInfo | undefined
+  if (!info) throw new Error('Convert failed — no job created')
+  return info.jobId
+}
+
+export interface PackManifest {
+  identifier: string
+  name: string
+  stickers: Array<{ image_file: string; emojis: string[] }>
+}
+
+export interface PackSummary {
+  code: string
+  name: string
+  jobIds: string[]
+  ready: number
+  built: boolean
+}
+
+async function packJson<T>(url: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${url}`, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  })
+  const json = await res.json()
+  if (!res.ok) throw new Error(json.error || `${method} ${url} failed`)
   return json
 }
+
+export const listPacks = (): Promise<PackSummary[]> => packJson('/api/packs', 'GET')
+export const createPack = (name: string): Promise<PackSummary> => packJson('/api/packs', 'POST', { name })
+export const renamePack = (code: string, name: string): Promise<PackSummary> => packJson(`/api/packs/${code}`, 'PATCH', { name })
+export const deletePack = (code: string): Promise<void> => packJson(`/api/packs/${code}`, 'DELETE')
+export const setPackStickers = (code: string, jobIds: string[]): Promise<PackSummary> => packJson(`/api/packs/${code}/stickers`, 'PUT', { jobIds })
+export const buildPack = (code: string): Promise<PackManifest & { code: string }> => packJson(`/api/packs/${code}/build`, 'POST')
 
 export async function getJob(jobId: string): Promise<Job> {
   const res = await fetch(`${BASE}/api/job/${jobId}`)

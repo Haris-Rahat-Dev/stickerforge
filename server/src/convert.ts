@@ -71,6 +71,10 @@ export async function convertToSticker(opts: ConvertOptions, signal: AbortSignal
   const filters = cropF + buildFilters(fit, padColor, cropPos, border)
   const { kbps } = computeBitrateKbps(start, end, speed)
 
+  // Two-pass VP9 writes a stats file; without a unique -passlogfile every
+  // concurrent batch job shares the default ffmpeg2pass-0.log and a job reading
+  // another's log dies with "bit_rate, rate, width or height" (exit 234).
+  const passLog = `${outputPath}.passlog`
   const encode = (bitrateKbps: number): string[] => [
     '-progress', 'pipe:1',
     '-nostats',
@@ -87,6 +91,7 @@ export async function convertToSticker(opts: ConvertOptions, signal: AbortSignal
     '-row-mt', '1',
     '-deadline', 'good',
     '-cpu-used', '2',
+    '-passlogfile', passLog,
     '-pix_fmt', 'yuv420p'
   ]
 
@@ -120,10 +125,11 @@ export function extractTray(inputPath: string, trayPath: string, start: number, 
   const cropF = crop ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` : ''
   const pos = Math.min(1, Math.max(0, cropPos ?? 0.5))
   return new Promise((resolve) => {
+    // WhatsApp tray must be 96×96 PNG, ≤50KB — not 512.
     const p = spawn('ffmpeg', [
       '-ss', String(Math.max(0, start)),
       '-i', inputPath,
-      '-vf', `${cropF}scale=512:512:force_original_aspect_ratio=increase,crop=512:512:(iw-512)*${pos}:(ih-512)*${pos}`,
+      '-vf', `${cropF}scale=96:96:force_original_aspect_ratio=increase,crop=96:96:(iw-96)*${pos}:(ih-96)*${pos}`,
       '-frames:v', '1', '-y', trayPath
     ])
     p.on('close', () => resolve())

@@ -2,12 +2,17 @@ package com.stickerforge.app;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.util.List;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -22,11 +27,12 @@ import java.nio.charset.StandardCharsets;
 public class MainActivity extends Activity {
 
     private static final int REQ_ADD_TO_WHATSAPP = 200;
-    private static final String PACK_CODE = "demo";
 
     private TextView status;
     private TextView packInfo;
     private Button addBtn;
+    private EditText codeInput;
+    private SharedPreferences prefs;
     private String packId;
     private String packName;
 
@@ -62,6 +68,23 @@ public class MainActivity extends Activity {
         View spacer2 = new View(this);
         root.addView(spacer2, new LinearLayout.LayoutParams(1, dp(20)));
 
+        prefs = getSharedPreferences("stickerforge", MODE_PRIVATE);
+        TextView codeLabel = new TextView(this);
+        codeLabel.setText("Pack code (scan the QR on your Mac, or type it):");
+        codeLabel.setTextSize(12);
+        codeLabel.setTextColor(0xFF99A089);
+        root.addView(codeLabel);
+
+        codeInput = new EditText(this);
+        codeInput.setSingleLine(true);
+        codeInput.setHint("pack code");
+        codeInput.setText(prefs.getString("code", "demo"));
+        codeInput.setTextColor(0xFFEFEFDF);
+        root.addView(codeInput);
+
+        View spacer2b = new View(this);
+        root.addView(spacer2b, new LinearLayout.LayoutParams(1, dp(16)));
+
         packInfo = new TextView(this);
         packInfo.setTextSize(14);
         packInfo.setTextColor(0xFFEFEFDF);
@@ -82,6 +105,34 @@ public class MainActivity extends Activity {
         root.addView(addBtn);
 
         setContentView(root);
+        handleDeepLink(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleDeepLink(intent);
+    }
+
+    // stickerforge://pack/<code> — from scanning the QR on the Mac. Fills the code
+    // field and loads immediately.
+    private void handleDeepLink(Intent intent) {
+        Uri data = intent != null ? intent.getData() : null;
+        if (data == null || !"stickerforge".equals(data.getScheme())) return;
+        List<String> seg = data.getPathSegments();
+        String code = !seg.isEmpty() ? seg.get(seg.size() - 1) : data.getHost();
+        if (code != null && !code.isEmpty() && !"pack".equals(code)) {
+            codeInput.setText(code);
+            loadPack();
+        }
+    }
+
+    private String currentCode() {
+        String c = codeInput.getText().toString().trim();
+        if (c.isEmpty()) c = "demo";
+        prefs.edit().putString("code", c).apply();
+        return c;
     }
 
     private int dp(int v) {
@@ -93,26 +144,28 @@ public class MainActivity extends Activity {
     }
 
     private void loadPack() {
-        status("Loading pack from " + BuildConfig.API_BASE + " …");
+        final String code = currentCode();
+        status("Loading pack " + code + " from " + BuildConfig.API_BASE + " …");
         new Thread(() -> {
             try {
-                JSONObject manifest = fetchJson(BuildConfig.API_BASE + "/api/pack/" + PACK_CODE);
+                JSONObject manifest = fetchJson(BuildConfig.API_BASE + "/api/pack/" + code);
                 String identifier = manifest.getString("identifier");
                 String trayFile = manifest.getString("tray_image_file");
 
+                // Save flat into filesDir/stickers/ — the provider reads files by
+                // name from here (no identifier subdir), and the manifest lives here too.
                 File dir = new File(getFilesDir(), "stickers");
-                File packDir = new File(dir, identifier);
-                packDir.mkdirs();
+                dir.mkdirs();
 
-                download(BuildConfig.API_BASE + "/api/pack/" + PACK_CODE + "/file/" + trayFile,
-                        new File(packDir, trayFile));
+                download(BuildConfig.API_BASE + "/api/pack/" + code + "/file/" + trayFile,
+                        new File(dir, trayFile));
 
                 JSONArray stickers = manifest.getJSONArray("stickers");
                 for (int i = 0; i < stickers.length(); i++) {
                     String f = stickers.getJSONObject(i).getString("image_file");
                     status("Downloading " + (i + 1) + "/" + stickers.length() + " …");
-                    download(BuildConfig.API_BASE + "/api/pack/" + PACK_CODE + "/file/" + f,
-                            new File(packDir, f));
+                    download(BuildConfig.API_BASE + "/api/pack/" + code + "/file/" + f,
+                            new File(dir, f));
                 }
 
                 // provider reads this exact path

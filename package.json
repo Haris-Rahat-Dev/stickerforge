@@ -12,8 +12,10 @@
     "test:e2e": "bash scripts/e2e.sh"
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "express": "^4.21.2",
     "multer": "^1.4.5-lts.1",
+    "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

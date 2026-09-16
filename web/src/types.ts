@@ -82,9 +82,12 @@ export interface UploadProgress {
   progress: number
 }
 
-export interface BatchItem extends BatchJobInfo {
-  status: JobStatus
-  progress: number
+// Per-card state in the staging tray. Absent = "needs review" (uploaded,
+// not yet added). 'encoding' → 'inpack' | 'error'.
+export interface PackEntry {
+  status: 'encoding' | 'inpack' | 'error'
+  jobId?: string
+  progress?: number
   sizeBytes?: number
   error?: string
 }

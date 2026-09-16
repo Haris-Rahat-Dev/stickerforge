@@ -6,7 +6,7 @@ import Timeline from './Timeline.jsx'
 const MIN_SPAN = 0.3
 const MAX_OUT_DUR = 6
 
-export default function Editor({ file, onClose }: { file: FileRecord; onClose: () => void }) {
+export default function Editor({ file, onClose, onAddedToPack }: { file: FileRecord; onClose: () => void; onAddedToPack?: (jobId: string, sizeBytes?: number) => void }) {
   const meta = file.meta
   const duration = Math.max(meta.duration, 0.5)
 
@@ -48,7 +48,8 @@ export default function Editor({ file, onClose }: { file: FileRecord; onClose: (
         const j = await getJob(jobId)
         if (stop) return
         setJob(j)
-        if (j.status === 'done' || j.status === 'error') clearInterval(timer)
+        if (j.status === 'done') { onAddedToPack?.(jobId, j.sizeBytes); clearInterval(timer) }
+        else if (j.status === 'error') clearInterval(timer)
       } catch { clearInterval(timer) }
     }, 600)
     return () => { stop = true; clearInterval(timer) }
@@ -236,7 +237,7 @@ export default function Editor({ file, onClose }: { file: FileRecord; onClose: (
               <div className="spec-hint">→ WebM/VP9 · 512×512 · ≤30fps · ≤6s · &lt;500KB · silent</div>
 
               <button className="btn btn-primary convert-btn" disabled={!!job && job.status === 'running'} onClick={doConvert}>
-                {job?.status === 'running' ? `Encoding… ${Math.round((job.progress || 0) * 100)}%` : '⚡ Make sticker'}
+                {job?.status === 'running' ? `Encoding… ${Math.round((job.progress || 0) * 100)}%` : '⚡ Add to pack'}
               </button>
               {job?.status === 'running' && (
                 <div className="progress"><div className="progress-fill" style={{ width: `${Math.round(job.progress * 100)}%` }} /></div>
