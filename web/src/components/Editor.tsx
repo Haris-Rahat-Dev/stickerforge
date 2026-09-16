@@ -23,7 +23,6 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
   const [border, setBorder] = useState(false)
   const [advanced, setAdvanced] = useState(false)
   const [cropEdit, setCropEdit] = useState(false)
-  const [squareLock, setSquareLock] = useState(true)
   const [stripUrl, setStripUrl] = useState<string | null>(null)
   const [loopTrim, setLoopTrim] = useState(true)
   const [jobId, setJobId] = useState<string | null>(null)
@@ -120,8 +119,8 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
   const qualityChip = QUALITY[file.quality.level] ?? QUALITY.ok
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
+    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="modal">
         <div className="modal-head">
           <div>
             <h2 title={file.originalName}>{file.originalName}</h2>
@@ -159,7 +158,7 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
                       ) : (
                         <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />
                       )}
-                      {crop && <CropBox meta={meta} crop={crop} squareLock={squareLock} onChange={setCrop} />}
+                      {crop && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
                     </>
                   ) : (
                     <div style={frameStyle(fit, meta, activeCrop, cropPos)}>
@@ -228,9 +227,7 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
 
               {cropEdit && (
                 <div className="crop-controls">
-                  <label className="crop-check">
-                    <input type="checkbox" checked={squareLock} onChange={e => setSquareLock(e.target.checked)} /> Lock square
-                  </label>
+                  <span className="crop-hint">Drag the box · corners &amp; edges resize</span>
                   <button className="btn btn-ghost btn-sm" disabled={cropDetecting} onClick={async () => {
                     setCropDetecting(true)
                     const c = await detectCrop(file.id).catch(() => null)
@@ -240,8 +237,17 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
                   <button className="btn btn-ghost btn-sm" onClick={() => {
                     const s = Math.min(meta.width, meta.height)
                     setCrop({ w: s, h: s, x: Math.round((meta.width - s) / 2), y: Math.round((meta.height - s) / 2) })
-                    setSquareLock(true)
-                  }}>↺ Reset</button>
+                  }}>↺ Reset crop</button>
+                </div>
+              )}
+              {cropEdit && crop && Math.abs(crop.w / crop.h - 1) > 0.02 && (
+                <div className="crop-fill">
+                  <span className="ctl-label">Non-square selection — fill the sticker by:</span>
+                  <div className="seg">
+                    {([['cover', 'Crop'], ['contain', 'Pad']] as Array<[FitMode, string]>).map(([val, label]) => (
+                      <button key={val} className={`seg-btn ${fit === val ? 'active' : ''}`} onClick={() => setFit(val)}>{label}</button>
+                    ))}
+                  </div>
                 </div>
               )}
               {cropOn && crop && !cropEdit && (
@@ -402,10 +408,9 @@ const clampN = (v: number, lo: number, hi: number): number => Math.min(hi, Math.
 
 // Draggable / resizable crop box over the full frame (shown at contain scale in the
 // square stage). Emits a source-pixel crop rect the encoder already understands.
-function CropBox({ meta, crop, squareLock, onChange }: {
+function CropBox({ meta, crop, onChange }: {
   meta: { width: number; height: number }
   crop: CropRect
-  squareLock: boolean
   onChange: (c: CropRect) => void
 }) {
   const W = meta.width, H = meta.height
@@ -419,7 +424,7 @@ function CropBox({ meta, crop, squareLock, onChange }: {
     height: `${(crop.h / H) * dispH}%`
   }
 
-  const drag = (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => (e: React.PointerEvent) => {
+  const drag = (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w') => (e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
     const stage = (e.currentTarget as HTMLElement).closest('.stage') as HTMLElement
     const rect = stage.getBoundingClientRect()
@@ -427,24 +432,24 @@ function CropBox({ meta, crop, squareLock, onChange }: {
     const pxY = (dispH / 100 * rect.height) / H
     const sx = e.clientX, sy = e.clientY
     const o = { ...crop }
+    const right = o.x + o.w, bottom = o.y + o.h
     const onMove = (ev: PointerEvent): void => {
       const dx = (ev.clientX - sx) / pxX
       const dy = (ev.clientY - sy) / pxY
       let n: CropRect
       if (mode === 'move') {
         n = { ...o, x: Math.round(clampN(o.x + dx, 0, W - o.w)), y: Math.round(clampN(o.y + dy, 0, H - o.h)) }
-      } else {
+      } else if (mode === 'e' || mode === 'w') {   // horizontal edge — width only
+        const w = clampN(mode === 'e' ? o.w + dx : o.w - dx, 24, mode === 'e' ? W - o.x : right)
+        n = { y: o.y, h: o.h, w: Math.round(w), x: Math.round(mode === 'e' ? o.x : right - w) }
+      } else if (mode === 'n' || mode === 's') {   // vertical edge — height only
+        const h = clampN(mode === 's' ? o.h + dy : o.h - dy, 24, mode === 's' ? H - o.y : bottom)
+        n = { x: o.x, w: o.w, h: Math.round(h), y: Math.round(mode === 's' ? o.y : bottom - h) }
+      } else {                                      // corner — free both axes
         const east = mode.includes('e'), south = mode.includes('s')
-        const right = o.x + o.w, bottom = o.y + o.h
-        if (squareLock) {
-          let side = Math.max(east ? o.w + dx : o.w - dx, south ? o.h + dy : o.h - dy)
-          side = clampN(side, 24, Math.min(east ? W - o.x : right, south ? H - o.y : bottom))
-          n = { w: Math.round(side), h: Math.round(side), x: Math.round(east ? o.x : right - side), y: Math.round(south ? o.y : bottom - side) }
-        } else {
-          const w = clampN(east ? o.w + dx : o.w - dx, 24, east ? W - o.x : right)
-          const h = clampN(south ? o.h + dy : o.h - dy, 24, south ? H - o.y : bottom)
-          n = { w: Math.round(w), h: Math.round(h), x: Math.round(east ? o.x : right - w), y: Math.round(south ? o.y : bottom - h) }
-        }
+        const w = clampN(east ? o.w + dx : o.w - dx, 24, east ? W - o.x : right)
+        const h = clampN(south ? o.h + dy : o.h - dy, 24, south ? H - o.y : bottom)
+        n = { w: Math.round(w), h: Math.round(h), x: Math.round(east ? o.x : right - w), y: Math.round(south ? o.y : bottom - h) }
       }
       onChange(n)
     }
@@ -460,6 +465,10 @@ function CropBox({ meta, crop, squareLock, onChange }: {
     <div className="cropbox" style={style} onPointerDown={drag('move')}>
       {(['nw', 'ne', 'sw', 'se'] as const).map(h => (
         <span key={h} className={`crop-handle ${h}`} onPointerDown={drag(h)} />
+      ))}
+      {/* edge handles for independent width/height crop */}
+      {(['n', 's', 'e', 'w'] as const).map(h => (
+        <span key={h} className={`crop-handle edge ${h}`} onPointerDown={drag(h)} />
       ))}
     </div>
   )

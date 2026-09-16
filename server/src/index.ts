@@ -23,6 +23,11 @@ const WEB_DIST = path.join(ROOT, 'web', 'dist')
 
 for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS]) fs.mkdirSync(dir, { recursive: true })
 
+// Safety net: a stray rejected promise (e.g. an ffmpeg failure in an async route)
+// must never take the whole server down. Log and keep serving.
+process.on('unhandledRejection', err => console.error('unhandledRejection:', err))
+process.on('uncaughtException', err => console.error('uncaughtException:', err))
+
 const app = express()
 app.use(express.json())
 
@@ -203,21 +208,26 @@ app.get('/api/filmstrip/:id', async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   const out = path.join(DATA, `${req.params.id}-strip.jpg`)
-  if (!fs.existsSync(out)) {
-    const n = 12
-    const fpsArg = n / Math.max(rec.meta.duration, 0.5)
-    await new Promise<void>((resolve, reject) => {
-      const p = spawn('ffmpeg', [
-        '-i', rec.path,
-        '-vf', `fps=${fpsArg.toFixed(4)},scale=96:-1,tile=${n}x1`,
-        '-frames:v', '1',
-        '-y', out
-      ])
-      p.on('close', (c: number | null) => c === 0 ? resolve() : reject(new Error(`filmstrip failed (${c})`)))
-      p.on('error', reject)
-    })
+  try {
+    if (!fs.existsSync(out)) {
+      const n = 12
+      const fpsArg = n / Math.max(rec.meta.duration, 0.5)
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn('ffmpeg', [
+          '-i', rec.path,
+          '-vf', `fps=${fpsArg.toFixed(4)},scale=96:-1,tile=${n}x1`,
+          '-frames:v', '1',
+          '-y', out
+        ])
+        p.on('close', (c: number | null) => c === 0 ? resolve() : reject(new Error(`filmstrip failed (${c})`)))
+        p.on('error', reject)
+      })
+    }
+    res.sendFile(out)
+  } catch {
+    // a source ffmpeg can't read shouldn't take the server down — just skip the strip
+    res.status(422).json({ error: 'Could not build filmstrip' })
   }
-  res.sendFile(out)
 })
 
 app.get('/api/cropdetect/:id', async (req, res) => {

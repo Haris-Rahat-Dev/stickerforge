@@ -270,8 +270,13 @@ body::after {
 .crop-handle.ne { right: -8px; top: -8px; cursor: nesw-resize; }
 .crop-handle.sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
 .crop-handle.se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.crop-handle.edge.n { top: -8px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.crop-handle.edge.s { bottom: -8px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.crop-handle.edge.e { right: -8px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.crop-handle.edge.w { left: -8px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.crop-fill { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
 .crop-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
-.crop-check { font-family: var(--font-mono); font-size: 12px; color: var(--ink); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.crop-hint { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .linkbtn { background: none; border: none; color: var(--green); cursor: pointer; text-decoration: underline; font: inherit; padding: 0; }
 .crop-toggle { align-self: flex-start; }
 
