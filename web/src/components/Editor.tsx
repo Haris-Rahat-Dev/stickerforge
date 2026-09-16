@@ -19,8 +19,11 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
   const [cropOn, setCropOn] = useState(false)
   const [crop, setCrop] = useState<CropRect | null>(null)
   const [cropDetecting, setCropDetecting] = useState(false)
-  const [cropPos, setCropPos] = useState(0.5)
+  const [cropPos] = useState(0.5)
   const [border, setBorder] = useState(false)
+  const [advanced, setAdvanced] = useState(false)
+  const [cropEdit, setCropEdit] = useState(false)
+  const [squareLock, setSquareLock] = useState(true)
   const [stripUrl, setStripUrl] = useState<string | null>(null)
   const [loopTrim, setLoopTrim] = useState(true)
   const [jobId, setJobId] = useState<string | null>(null)
@@ -93,16 +96,6 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
     setEnd(s + ms)
   }
 
-  const toggleCrop = async (): Promise<void> => {
-    if (cropOn) { setCropOn(false); return }
-    if (!crop) {
-      setCropDetecting(true)
-      try { setCrop(await detectCrop(file.id)) } catch { /* keep null */ }
-      setCropDetecting(false)
-    }
-    setCropOn(true)
-  }
-
   const activeCrop = cropOn && crop ? crop : null
 
   const doConvert = async (): Promise<void> => {
@@ -117,8 +110,13 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
 
   const reset = (): void => { setJob(null); setJobId(null) }
 
-  const tall = meta.height > meta.width
   const isImage = file.kind === 'image'
+  // Cover can only pan when the (optionally black-border-cropped) source isn't
+  // already square — a square source fills the sticker exactly, nothing to crop.
+  const srcAspect = (activeCrop?.w ?? meta.width) / (activeCrop?.h ?? meta.height)
+  // A square source fills the sticker exactly — Crop and Pad give the same result,
+  // so there's no framing decision to make (and nothing to pan).
+  const needsFraming = Math.abs(srcAspect - 1) > 0.02
   const qualityChip = QUALITY[file.quality.level] ?? QUALITY.ok
 
   return (
@@ -152,23 +150,31 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
               >
                 <div
                   className="stage"
-                  style={fit === 'contain' ? { background: padColor } : undefined}
+                  style={!cropEdit && fit === 'contain' ? { background: padColor } : undefined}
                 >
-                  <div style={frameStyle(fit, meta, activeCrop, cropPos)}>
-                    {isImage ? (
-                      <img src={videoUrl(file.id)} style={videoStyle(meta, activeCrop)} alt={file.originalName} />
-                    ) : (
-                      <video
-                        ref={videoRef}
-                        src={videoUrl(file.id)}
-                        controls muted playsInline preload="auto"
-                        style={videoStyle(meta, activeCrop)}
-                      />
-                    )}
-                  </div>
-                  {fit === 'cover' && cropOverlays(meta, activeCrop, cropPos).map((s, i) => (
-                    <div key={i} className="crop-dim" style={s} />
-                  ))}
+                  {cropEdit ? (
+                    <>
+                      {isImage ? (
+                        <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
+                      ) : (
+                        <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />
+                      )}
+                      {crop && <CropBox meta={meta} crop={crop} squareLock={squareLock} onChange={setCrop} />}
+                    </>
+                  ) : (
+                    <div style={frameStyle(fit, meta, activeCrop, cropPos)}>
+                      {isImage ? (
+                        <img src={videoUrl(file.id)} style={videoStyle(meta, activeCrop)} alt={file.originalName} />
+                      ) : (
+                        <video
+                          ref={videoRef}
+                          src={videoUrl(file.id)}
+                          controls muted playsInline preload="auto"
+                          style={videoStyle(meta, activeCrop)}
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
               {!isImage && (
@@ -185,46 +191,61 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
             </div>
 
             <div className="controls-col">
-              <label className="ctl-label">Framing</label>
-              <div className="seg">
-                {([['cover', 'Crop'], ['contain', 'Pad'], ['stretch', 'Stretch']] as Array<[FitMode, string]>).map(([val, label]) => (
-                  <button key={val} className={`seg-btn ${fit === val ? 'active' : ''}`} onClick={() => setFit(val)}>{label}</button>
-                ))}
-              </div>
-              {fit === 'contain' && (
-                <div className="swatches">
-                  {['#000000', '#ffffff', '#25d366', '#128c7e', '#ece5dd'].map(c => (
-                    <button key={c} className={`swatch ${padColor === c ? 'active' : ''}`} style={{ background: c }} onClick={() => setPadColor(c)} />
-                  ))}
-                </div>
+              {needsFraming ? (
+                <>
+                  <label className="ctl-label">Framing</label>
+                  <div className="seg">
+                    {([['cover', 'Crop'], ['contain', 'Pad']] as Array<[FitMode, string]>).map(([val, label]) => (
+                      <button key={val} className={`seg-btn ${fit === val ? 'active' : ''}`} onClick={() => setFit(val)}>{label}</button>
+                    ))}
+                  </div>
+                  {fit === 'contain' && (
+                    <div className="swatches">
+                      {['#000000', '#ffffff', '#25d366', '#128c7e', '#ece5dd'].map(c => (
+                        <button key={c} className={`swatch ${padColor === c ? 'active' : ''}`} style={{ background: c }} onClick={() => setPadColor(c)} />
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="note">Square source — fills the sticker exactly, no framing needed.</span>
               )}
 
               <button
-                className={`btn btn-ghost btn-sm crop-toggle ${cropOn ? 'active' : ''}`}
-                onClick={toggleCrop}
-                disabled={cropDetecting}
-                title="Detects and trims black borders baked into the video"
+                className={`btn btn-ghost btn-sm crop-toggle ${cropEdit ? 'active' : ''}`}
+                onClick={() => {
+                  if (cropEdit) { setCropEdit(false); return }
+                  if (!crop) {
+                    const s = Math.min(meta.width, meta.height)
+                    setCrop({ w: s, h: s, x: Math.round((meta.width - s) / 2), y: Math.round((meta.height - s) / 2) })
+                  }
+                  setCropOn(true); setFit('cover'); setCropEdit(true)
+                }}
+                title="Drag a box on the preview to crop / reframe — cut watermarks, edge text, whatever you want out"
               >
-                {cropDetecting ? '⏳ Detecting borders…' : cropOn ? '✂ Black borders removed' : '✂ Remove black borders'}
+                {cropEdit ? '✓ Done cropping' : '✂ Crop / reframe'}
               </button>
-              {cropOn && crop && (crop.w < meta.width - 2 || crop.h < meta.height - 2) && (
-                <span className="note note-good">Found borders — cropping to {crop.w}×{crop.h}</span>
-              )}
-              {cropOn && crop && crop.w >= meta.width - 2 && crop.h >= meta.height - 2 && (
-                <span className="note">No black borders detected</span>
-              )}
 
-              {fit === 'cover' && (
-                <div className="crop-pos">
-                  <label className="ctl-label">Crop position — keep {tall ? 'top' : 'left'} ↔ {tall ? 'bottom' : 'right'}</label>
-                  <div className="speed-row">
-                    <input
-                      type="range" min={0} max={1} step={0.05} value={cropPos}
-                      onChange={e => setCropPos(parseFloat(e.target.value))}
-                    />
-                    <span className="speed-val">{Math.round(cropPos * 100)}%</span>
-                  </div>
+              {cropEdit && (
+                <div className="crop-controls">
+                  <label className="crop-check">
+                    <input type="checkbox" checked={squareLock} onChange={e => setSquareLock(e.target.checked)} /> Lock square
+                  </label>
+                  <button className="btn btn-ghost btn-sm" disabled={cropDetecting} onClick={async () => {
+                    setCropDetecting(true)
+                    const c = await detectCrop(file.id).catch(() => null)
+                    if (c) setCrop(c)
+                    setCropDetecting(false)
+                  }}>{cropDetecting ? '⏳ Detecting…' : '⌖ Auto (black borders)'}</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => {
+                    const s = Math.min(meta.width, meta.height)
+                    setCrop({ w: s, h: s, x: Math.round((meta.width - s) / 2), y: Math.round((meta.height - s) / 2) })
+                    setSquareLock(true)
+                  }}>↺ Reset</button>
                 </div>
+              )}
+              {cropOn && crop && !cropEdit && (
+                <span className="note note-good">Cropped to {crop.w}×{crop.h} · <button className="linkbtn" onClick={() => { setCropOn(false); setCrop(null) }}>clear</button></span>
               )}
 
               <button
@@ -236,18 +257,30 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
               </button>
 
               {!isImage && (
-                <>
-                  <label className="ctl-label">Speed — squeeze long moments into 6s</label>
-                  <div className="speed-row">
-                    <input type="range" min={0.25} max={4} step={0.25} value={speed} onChange={e => changeSpeed(parseFloat(e.target.value))} />
-                    <span className="speed-val">{speed}×</span>
-                  </div>
+                <div className="advanced">
+                  <button className="btn btn-ghost btn-sm adv-toggle" onClick={() => setAdvanced(a => !a)}>
+                    {advanced ? '▾' : '▸'} Advanced — speed &amp; frame rate
+                  </button>
+                  {advanced && (
+                    <div className="adv-body">
+                      <label className="ctl-label">Speed — squeeze long moments into 6s</label>
+                      <div className="speed-row">
+                        <input type="range" min={0.25} max={4} step={0.25} value={speed} onChange={e => changeSpeed(parseFloat(e.target.value))} />
+                        <span className="speed-val">{speed}×</span>
+                      </div>
 
-                  <label className="ctl-label">Frame rate</label>
-                  <select value={fps} onChange={e => setFps(parseInt(e.target.value, 10))}>
-                    {fpsOptions(meta.fps).map(f => <option key={f} value={f}>{f} fps</option>)}
-                  </select>
-                </>
+                      <label className="ctl-label">Frame rate</label>
+                      <select value={fps} onChange={e => setFps(parseInt(e.target.value, 10))}>
+                        {fpsOptions(meta.fps).map(f => <option key={f} value={f}>{f} fps</option>)}
+                      </select>
+
+                      <div className="frame-estimate">
+                        ~{Math.max(1, Math.round(outDur * fps))} frames · ~{(470 / Math.max(1, outDur * fps)).toFixed(1)}KB each
+                        {outDur * fps > 150 ? ' · softer' : ' · sharp'}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
 
               <div className="spec-hint">{isImage ? '→ still → motionless animated WebP · 512×512' : '→ WebM/VP9 · 512×512 · ≤30fps · ≤6s · <500KB · silent'}</div>
@@ -365,23 +398,71 @@ function videoStyle(meta: FileRecord['meta'], crop: CropRect | null): React.CSSP
   }
 }
 
-function cropOverlays(meta: FileRecord['meta'], crop: CropRect | null, cropPos = 0.5): React.CSSProperties[] {
-  const cw = crop?.w || meta.width
-  const ch = crop?.h || meta.height
-  const r = cw / ch
-  const p = Math.min(1, Math.max(0, cropPos ?? 0.5))
-  if (r < 1) {
-    const ov = (1 / r - 1) * 100
-    return [
-      { top: '0%', left: '0%', right: '0%', height: `${p * ov}%` },
-      { bottom: '0%', left: '0%', right: '0%', height: `${(1 - p) * ov}%` }
-    ]
+const clampN = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
+
+// Draggable / resizable crop box over the full frame (shown at contain scale in the
+// square stage). Emits a source-pixel crop rect the encoder already understands.
+function CropBox({ meta, crop, squareLock, onChange }: {
+  meta: { width: number; height: number }
+  crop: CropRect
+  squareLock: boolean
+  onChange: (c: CropRect) => void
+}) {
+  const W = meta.width, H = meta.height
+  const dispW = W >= H ? 100 : (W / H) * 100
+  const dispH = W >= H ? (H / W) * 100 : 100
+  const offX = (100 - dispW) / 2, offY = (100 - dispH) / 2
+  const style: React.CSSProperties = {
+    left: `${offX + (crop.x / W) * dispW}%`,
+    top: `${offY + (crop.y / H) * dispH}%`,
+    width: `${(crop.w / W) * dispW}%`,
+    height: `${(crop.h / H) * dispH}%`
   }
-  const ov = (r - 1) * 100
-  return [
-    { left: '0%', top: '0%', bottom: '0%', width: `${p * ov}%` },
-    { right: '0%', top: '0%', bottom: '0%', width: `${(1 - p) * ov}%` }
-  ]
+
+  const drag = (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => (e: React.PointerEvent) => {
+    e.preventDefault(); e.stopPropagation()
+    const stage = (e.currentTarget as HTMLElement).closest('.stage') as HTMLElement
+    const rect = stage.getBoundingClientRect()
+    const pxX = (dispW / 100 * rect.width) / W
+    const pxY = (dispH / 100 * rect.height) / H
+    const sx = e.clientX, sy = e.clientY
+    const o = { ...crop }
+    const onMove = (ev: PointerEvent): void => {
+      const dx = (ev.clientX - sx) / pxX
+      const dy = (ev.clientY - sy) / pxY
+      let n: CropRect
+      if (mode === 'move') {
+        n = { ...o, x: Math.round(clampN(o.x + dx, 0, W - o.w)), y: Math.round(clampN(o.y + dy, 0, H - o.h)) }
+      } else {
+        const east = mode.includes('e'), south = mode.includes('s')
+        const right = o.x + o.w, bottom = o.y + o.h
+        if (squareLock) {
+          let side = Math.max(east ? o.w + dx : o.w - dx, south ? o.h + dy : o.h - dy)
+          side = clampN(side, 24, Math.min(east ? W - o.x : right, south ? H - o.y : bottom))
+          n = { w: Math.round(side), h: Math.round(side), x: Math.round(east ? o.x : right - side), y: Math.round(south ? o.y : bottom - side) }
+        } else {
+          const w = clampN(east ? o.w + dx : o.w - dx, 24, east ? W - o.x : right)
+          const h = clampN(south ? o.h + dy : o.h - dy, 24, south ? H - o.y : bottom)
+          n = { w: Math.round(w), h: Math.round(h), x: Math.round(east ? o.x : right - w), y: Math.round(south ? o.y : bottom - h) }
+        }
+      }
+      onChange(n)
+    }
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  return (
+    <div className="cropbox" style={style} onPointerDown={drag('move')}>
+      {(['nw', 'ne', 'sw', 'se'] as const).map(h => (
+        <span key={h} className={`crop-handle ${h}`} onPointerDown={drag(h)} />
+      ))}
+    </div>
+  )
 }
 
 const QUALITY: Record<string, { label: string }> = {

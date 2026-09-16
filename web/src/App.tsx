@@ -199,12 +199,12 @@ export default function App() {
         <Steps stage={stage} />
       </header>
 
-      {stage === 'import' && <EmptyDropzone onClick={() => inputRef.current?.click()} />}
+      {stage === 'import' && uploads.length === 0 && <EmptyDropzone onClick={() => inputRef.current?.click()} />}
 
-      {stage === 'stage' && (
+      {(stage === 'stage' || (stage === 'import' && uploads.length > 0)) && (
         <main className="content">
           <div className="toolbar">
-            <button className="btn btn-ghost" onClick={() => inputRef.current?.click()}>＋ Add videos</button>
+            <button className="btn btn-ghost" onClick={() => inputRef.current?.click()}>＋ Add media</button>
             <PackSwitcher packs={packs} activeCode={activeCode} onSelect={c => dispatch({ type: 'setActive', code: c })} onNew={newPack} onRename={renameActive} onDelete={deleteActive} />
           </div>
           <div className="grid">
@@ -221,23 +221,12 @@ export default function App() {
                 onRemove={() => removeFile(f.id)}
               />
             ))}
+            {uploads.map(u => <UploadCard key={u.key} name={u.name} progress={u.progress} />)}
           </div>
         </main>
       )}
 
       {stage === 'install' && built && <InstallStage manifest={built} building={building} onEdit={() => dispatch({ type: 'edit' })} onRebuild={doBuild} />}
-
-      {uploads.length > 0 && (
-        <div className="upload-tray">
-          {uploads.map(u => (
-            <div key={u.key} className="upload-row">
-              <span className="upload-name">{u.name}</span>
-              <div className="progress slim"><div className="progress-fill" style={{ width: `${Math.round(u.progress * 100)}%` }} /></div>
-              <span>{Math.round(u.progress * 100)}%</span>
-            </div>
-          ))}
-        </div>
-      )}
 
       {stage === 'stage' && pack && (
         <div className="pack-bar">
@@ -253,7 +242,7 @@ export default function App() {
         </div>
       )}
 
-      {dragOver && <div className="drop-overlay"><div>⬇ Drop videos to import</div></div>}
+      {dragOver && <div className="drop-overlay"><div>⬇ Drop media to import</div></div>}
       <input ref={inputRef} type="file" accept="video/*,image/*,.mkv" multiple hidden onChange={e => { addFiles([...e.target.files!]); e.target.value = '' }} />
       {editing && (
         <Editor
@@ -299,8 +288,8 @@ function EmptyDropzone({ onClick }: { onClick: () => void }) {
     <main className="empty" onClick={onClick}>
       <div className="empty-box">
         <div className="empty-icon">🎬</div>
-        <h2>Feed me <em>videos</em></h2>
-        <p>or click to browse — MP4, MOV, WebM, MKV</p>
+        <h2>Feed me <em>media</em></h2>
+        <p>videos &amp; images — MP4, MOV, WebM, PNG, JPG, GIF</p>
         <div className="empty-steps">
           <span>① Import &amp; quality check</span>
           <span>② Add to a pack (auto or fine-tune)</span>
@@ -350,6 +339,22 @@ function InstallStage({ manifest, building, onEdit, onRebuild }: {
         </div>
       </div>
     </main>
+  )
+}
+
+function UploadCard({ name, progress }: { name: string; progress: number }) {
+  const pct = Math.round(progress * 100)
+  return (
+    <div className="card status-uploading">
+      <div className="thumb square skeleton">
+        <span className="status-chip encoding">Uploading… {pct}%</span>
+        <div className="thumb-progress"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
+      </div>
+      <div className="card-body">
+        <div className="card-name" title={name}>{name}</div>
+        <div className="meta-line">uploading to your Mac…</div>
+      </div>
+    </div>
   )
 }
 

@@ -252,7 +252,33 @@ body::after {
   position: absolute; z-index: 5; pointer-events: none;
   background: rgba(10, 12, 8, 0.74);
 }
+
+/* manual crop box */
+.crop-full { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.cropbox {
+  position: absolute; z-index: 6; cursor: move; box-sizing: border-box;
+  border: 2px solid var(--green);
+  box-shadow: 0 0 0 9999px rgba(6, 8, 5, 0.62);
+  touch-action: none;
+}
+.crop-handle {
+  position: absolute; width: 14px; height: 14px; z-index: 7;
+  background: var(--green); border: 2px solid var(--green-ink); border-radius: 3px;
+  touch-action: none;
+}
+.crop-handle.nw { left: -8px; top: -8px; cursor: nwse-resize; }
+.crop-handle.ne { right: -8px; top: -8px; cursor: nesw-resize; }
+.crop-handle.sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
+.crop-handle.se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.crop-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+.crop-check { font-family: var(--font-mono); font-size: 12px; color: var(--ink); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.linkbtn { background: none; border: none; color: var(--green); cursor: pointer; text-decoration: underline; font: inherit; padding: 0; }
 .crop-toggle { align-self: flex-start; }
+
+.advanced { margin-top: 4px; }
+.adv-toggle { align-self: flex-start; color: var(--muted); }
+.adv-body { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-left: 4px; border-left: 2px solid var(--line); padding-left: 12px; }
+.frame-estimate { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-top: 4px; }
 
 .trim-tools { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
 .out-dur { color: var(--muted); font-family: var(--font-mono); font-size: 12.5px; }
@@ -408,6 +434,14 @@ select {
   background: rgba(13, 15, 11, 0.8);
 }
 .card-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* uploading skeleton card */
+.thumb.skeleton {
+  background: linear-gradient(100deg, var(--panel-2) 30%, var(--line-hot) 50%, var(--panel-2) 70%);
+  background-size: 200% 100%;
+  animation: sf-shimmer 1.2s linear infinite;
+}
+@keyframes sf-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
 /* ── pack bar: build progress ───────────────────────────── */
 .content { padding-bottom: 84px; }
