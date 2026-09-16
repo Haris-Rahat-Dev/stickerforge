@@ -346,7 +346,7 @@ function InstallStage({ manifest, building, onEdit, onRebuild }: {
             <li><b>Scan the QR</b> with your phone camera → open in StickerForge (or type the code in the app).</li>
             <li>Tap <b>Load pack</b>, then <b>Add to WhatsApp</b>.</li>
           </ol>
-          <p className="handoff-note">Phone reaches the Mac over <code>adb reverse tcp:8080 tcp:3210</code> — nothing leaves the machine.</p>
+          <p className="handoff-note">Phone fetches the pack from the StickerForge server over Tailscale (same account).</p>
         </div>
       </div>
     </main>

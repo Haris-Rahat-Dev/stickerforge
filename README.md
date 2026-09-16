@@ -1,51 +1,119 @@
 # StickerForge
 
-WhatsApp video sticker maker — trim, crop, and compress any video into spec-perfect animated stickers (WebM/VP9, 512×512, ≤30fps, ≤6s, <500KB, silent).
+WhatsApp video-sticker maker: any video in → spec-perfect animated sticker out. Node API + React editor, plus a thin Android app that loads a pack and hands it to WhatsApp.
 
-## Local development
+Videos are processed on your StickerForge host (local machine or the deployed VM). Not a hosted UGC platform — no accounts, no feed, no iOS.
 
-Requires Node 20+, ffmpeg (`brew install ffmpeg`).
+## WhatsApp spec
+
+| Path | Format |
+|------|--------|
+| Chat / Sticker.ly import | WebM VP9, 512×512, ≤30fps, ≤6s, **&lt;500KB**, silent |
+| Third-party Android provider (`whatsapp/stickers`) | **Animated WebP**, same size/duration/fps caps |
+
+Pack minimum: **3 stickers**. Tray PNG required. Only an installed app with `StickerContentProvider` can add packs to WhatsApp (after user taps “Add to WhatsApp”). App must be WhatsApp-whitelisted for production.
+
+## Deployed setup (current)
+
+Hosted on **Oracle Cloud Always Free** (`ap-mumbai-1`):
+
+| Piece | Detail |
+|-------|--------|
+| Shape | `VM.Standard.E2.1.Micro` (interim; Ampere A1 preferred when capacity exists) |
+| App | systemd unit `stickerforge` — Node serves UI + API on port **3210** |
+| Data | SQLite + files under `~/stickerforge/data` on the VM |
+| Access | **Tailscale only** for the web UI / API (public `:3210` is closed) |
+| SSH | Still available on the VM public IP for admin |
+
+### Access the web editor
+
+1. Install [Tailscale](https://tailscale.com/) on your device and join the **same** tailnet as the VM (`stickerforge`).
+2. Open: **http://100.112.48.57:3210**  
+   (or MagicDNS `http://stickerforge:3210` if enabled on your tailnet)
+
+Flow: **Import → Stage → Build → Install**. Need ≥3 stickers in a pack, then scan the QR / use the pack code in the Android app.
+
+### Access from the Android app
+
+1. Install Tailscale on the phone (same account/tailnet).
+2. Build & install the debug APK (baked API base points at the Tailscale host):
 
 ```bash
-npm install
-npm run dev        # API on :3210, Vite UI on :5173
+cd android && ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Production
+Default `API_BASE` is `http://100.112.48.57:3210`. Override when building:
+
+```bash
+./gradlew -PapiBase=http://YOUR_HOST:3210 assembleDebug
+```
+
+3. Open StickerForge → Load pack (scan QR or paste code) → Add to WhatsApp.
+
+The QR encodes `stickerforge://pack/<code>` (opens the app). Pack files are fetched over HTTP from `API_BASE`.
+
+### Deploying web UI updates (today)
+
+There is **no** CI deploy pipeline yet. Manual:
 
 ```bash
 npm run build
-npm start          # serves UI + API on :3210
+rsync -az web/dist/ ubuntu@<vm-ssh-host>:~/stickerforge/web/dist/
+ssh ubuntu@<vm-ssh-host> 'sudo systemctl restart stickerforge'
 ```
 
-## Tests
+Prefer SSH via Tailscale once MagicDNS/SSH over Tailscale is set up; public SSH IP still works for ops.
+
+## Local development
+
+**System deps:** Node **22.5+** (`node:sqlite`), `ffmpeg`/`ffprobe`, `cwebp` + `webpmux` (Homebrew ffmpeg 8 has no libwebp encoder — install `webp` separately).
 
 ```bash
-npm run typecheck  # strict TS across server + web
-npm run test:e2e   # boots isolated server, runs 44 API/spec assertions
+npm install
+npm run dev          # API :3210 + Vite :5173 (proxies /api → 3210)
+npm run build && npm start   # single process, UI+API on :3210
+npm run typecheck
+npm run test:e2e     # needs SAMPLE_A/B in ~/Downloads — see scripts/e2e.sh
 ```
 
-The E2E suite uses two sample videos from `~/Downloads` — adjust `SAMPLE_A`/`SAMPLE_B` in `scripts/e2e.sh` if missing.
+Bind for LAN/VM: `HOST=0.0.0.0 npm start`.
 
-## Docker
+### Docker
 
 ```bash
 docker build -t stickerforge .
-docker run -p 3210:3210 -v stickerforge-data:/app/data stickerforge
+docker run -p 3210:3210 -e HOST=0.0.0.0 -v stickerforge-data:/app/data stickerforge
 ```
 
-## API
+Note: the image installs ffmpeg but **not** `cwebp`/`webpmux` — pack WebP export will fail until those are added to the image.
 
-| Method | Route | Purpose |
-|---|---|---|
-| POST | `/api/upload` | multipart video → FileRecord (probe + quality verdict) |
-| GET | `/api/files` | list imported files |
-| DELETE | `/api/file/:id` | remove import |
-| GET | `/api/video/:id` | stream original (range-supported) |
-| GET | `/api/filmstrip/:id` | 12-tile thumbnail strip |
-| GET | `/api/cropdetect/:id` | detect baked black borders |
-| POST | `/api/convert` | settings → `{ jobId }` |
-| GET | `/api/job/:id` | progress + result metadata |
-| POST | `/api/batch` | convert many with defaults |
-| GET | `/api/download/webm/:jobId` | final sticker |
-| GET | `/api/download/tray/:jobId` | static tray icon |
+## Architecture
+
+```
+web/                 React + Vite editor
+server/src/          Express API, SQLite, encode queue, WebM + WebP pipelines
+android/             Java StickerContentProvider + one-screen importer
+data/                uploads, outputs, trays, packs, stickerforge.db (gitignored)
+```
+
+Encode preview must match ffmpeg (trim, fit, crop, borders, speed, fps). Pack build re-encodes stickers to animated WebP for the Android provider path.
+
+## Security notes
+
+- Tailscale keeps the editor/API off the public internet.
+- The app has **no auth** — anyone on the tailnet can upload/encode.
+- Always Free Micro has ~1 GB RAM; large encodes may be slow or OOM (swap is configured on the VM).
+
+## Product decisions
+
+- Conversion stays on the server (two-pass VP9 is heavy for phones).
+- Android is native Java (WhatsApp sample contract), not RN/Capacitor.
+- Provider authority: `com.stickerforge.app.stickercontentprovider`.
+- iOS: no public provider API — web download + Sticker.ly is the interim.
+
+## Next
+
+1. Finish WhatsApp whitelist after a successful Add-to-WhatsApp on a real phone.
+2. Move to Always Free Ampere A1 when Mumbai capacity appears (more RAM/CPU for encodes).
+3. Add a real deploy script / CI when the host is stable.

@@ -13,7 +13,9 @@ android {
         versionCode 1
         versionName '1.0'
         buildConfigField 'String', 'CONTENT_PROVIDER_AUTHORITY', '"com.stickerforge.app.stickercontentprovider"'
-        buildConfigField 'String', 'API_BASE', '"http://127.0.0.1:8080"'
+        // Phone reaches the StickerForge host over Tailscale (same account).
+        // Override: ./gradlew -PapiBase=http://127.0.0.1:8080 assembleDebug
+        buildConfigField 'String', 'API_BASE', "\"${findProperty('apiBase') ?: 'http://100.112.48.57:3210'}\""
     }
 
     buildFeatures { buildConfig true }

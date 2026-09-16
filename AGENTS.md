@@ -4,7 +4,7 @@ Local WhatsApp video-sticker maker. Any video in → spec-perfect animated stick
 
 ## What this is
 
-A Node API + React editor on the Mac, plus a thin Android app that can push a pack into WhatsApp. Not a hosted UGC platform. No accounts, no feed, no iOS. Dogfood the local loop first; WhatsApp whitelist is the long pole.
+A Node API + React editor, plus a thin Android app that can push a pack into WhatsApp. Not a hosted UGC platform. No accounts, no feed, no iOS. Dogfood the local loop first; WhatsApp whitelist is the long pole.
 
 ## WhatsApp spec (non-negotiable)
 
@@ -34,11 +34,10 @@ Android (debug APK, phone or emulator):
 
 ```bash
 cd android && ./gradlew assembleDebug
-adb install app/build/outputs/apk/debug/app-debug.apk
-adb reverse tcp:8080 tcp:3210   # app talks to http://127.0.0.1:8080
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Then in the app: Load pack → Add to WhatsApp. Emulator proves the ContentProvider; only a real phone with WhatsApp signed in completes the last tap.
+Phone reaches the StickerForge host over Tailscale (baked `API_BASE`, default Tailscale IP). Override with `-PapiBase=…` if needed. Emulator proves the ContentProvider; only a real phone with WhatsApp signed in completes the last tap.
 
 System deps: **Node 22.5+** (uses the built-in `node:sqlite` for persistence — no dependency, but not available on Node 20/21), `ffmpeg`/`ffprobe`, `cwebp` + `webpmux` (Homebrew ffmpeg 8 has **no** libwebp encoder).
 
@@ -98,6 +97,21 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 
 ## Next (only if asked)
 
-1. Live phone test: install APK, `adb reverse`, Load pack, Add to WhatsApp.
+1. Live phone test: install APK (Tailscale to the StickerForge host), Load pack, Add to WhatsApp.
 2. Submit whitelist the same day that works.
 3. Then: host API (Fly/Hetzner + R2), pack builder, accounts. Not before.
+
+## Learned User Preferences
+
+- Prefer OCI Always Free for the first hosted deploy (long-running VM + disk/SQLite); skip Firebase/managed DB until needed.
+- Prefer Cursor Automations over local LaunchAgents/nohup for recurring OCI capacity retries.
+- For simple automations, prefer the cheapest standard model (Composer 2.5), not Fast variants.
+- When Always Free Ampere capacity appears, launch and hold the VM — do not only notify.
+- Push this repo with the Haris-Rahat-Dev GitHub account.
+
+## Learned Workspace Facts
+
+- Hosted StickerForge needs a long-running VM with ffmpeg/cwebp/webpmux; SQLite + local disk is enough for v1.
+- OCI home region for this project is `ap-mumbai-1`; Always Free Ampere A1 Flex is often out of capacity there.
+- When A1 is unavailable, Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg).
+- Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold), not a checked-in local loop.

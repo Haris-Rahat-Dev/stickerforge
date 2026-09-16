@@ -60,7 +60,7 @@ public class MainActivity extends Activity {
         root.addView(spacer, new LinearLayout.LayoutParams(1, dp(32)));
 
         status = new TextView(this);
-        status.setText("Connect your Mac (USB) and run:\nadb reverse tcp:8080 tcp:3210");
+        status.setText("Phone on Tailscale → " + BuildConfig.API_BASE);
         status.setTextSize(14);
         status.setTextColor(0xFFEFEFDF);
         root.addView(status);
@@ -70,7 +70,7 @@ public class MainActivity extends Activity {
 
         prefs = getSharedPreferences("stickerforge", MODE_PRIVATE);
         TextView codeLabel = new TextView(this);
-        codeLabel.setText("Pack code (scan the QR on your Mac, or type it):");
+        codeLabel.setText("Pack code (scan the QR, or type it):");
         codeLabel.setTextSize(12);
         codeLabel.setTextColor(0xFF99A089);
         root.addView(codeLabel);
@@ -115,7 +115,7 @@ public class MainActivity extends Activity {
         handleDeepLink(intent);
     }
 
-    // stickerforge://pack/<code> — from scanning the QR on the Mac. Fills the code
+    // stickerforge://pack/<code> — from scanning the install QR. Fills the code
     // field and loads immediately.
     private void handleDeepLink(Intent intent) {
         Uri data = intent != null ? intent.getData() : null;

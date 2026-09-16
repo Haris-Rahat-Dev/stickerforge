@@ -104,8 +104,7 @@ Original plan retained below for reference.
 - **Real pack codes.** Replace hardcoded `"demo"`. A pack gets a random unguessable
   `code` at creation; the Android app receives it (QR or paste) instead of assuming
   `demo`. `/api/pack/:code` resolves the persisted pack, not "last N jobs."
-- **Ownership checks.** `code` alone grants read (needed — the phone fetches over
-  the `adb reverse` bridge with no auth). Mutations (rebuild, add/remove sticker)
+- **Ownership checks.** `code` alone grants read (needed — the phone fetches with no auth). Mutations (rebuild, add/remove sticker)
   require the owner's `user_id`. This is the "possession logic" that's absent today.
 - **Pack = explicit entity.** Building a pack becomes "create pack from these N
   jobs" (persisted `pack_stickers` rows), not an implicit "grab the last 6 done."
@@ -184,8 +183,8 @@ stage missing entirely. Fix: model it explicitly.
   - file: `uploaded → reviewing → queued → encoding → in-pack → error`
   - pack: `draft → building → built → stale` (stale = edited since last build)
 - **Add the Install stage** (missing today): after Build, show the pack summary +
-  the phone handoff steps (Load pack → Add to WhatsApp). Not a QR — the phone reaches
-  the Mac over `adb reverse` to 127.0.0.1, so a network QR is useless here.
+  the phone handoff steps (Load pack → Add to WhatsApp). QR deep-links into the app;
+  the phone fetches the pack from the StickerForge host (e.g. over Tailscale).
 
 ## 4c. Job execution (decided: in-process queue + SQLite, no Redis)
 
