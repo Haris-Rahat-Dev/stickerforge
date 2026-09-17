@@ -370,15 +370,27 @@ const ownedPack = (req: express.Request, code: string): Pack | null => {
 // 30s). Reuses the pack's stable identifier and bumps its version so re-adding
 // updates the same WhatsApp pack instead of duplicating it.
 async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
-  const jobList = pack.jobIds
+  const finished = pack.jobIds
     .map(id => jobs.get(id))
     .filter((j): j is Job => !!j && j.status === 'done' && !!j.outMeta)
+  // One sticker per source file: fine-tuning re-encodes and can leave the file's
+  // old jobId in the pack. Keep the latest job per fileId (Map keeps first slot,
+  // overwrites to newest) — heals packs polluted before dedupe was enforced.
+  const byFile = new Map<string, Job>()
+  for (const j of finished) byFile.set(j.fileId, j)
+  const jobList = [...byFile.values()]
   if (jobList.length < 3) throw new Error('Need at least 3 finished stickers in the pack')
   if (jobList.length > 30) throw new Error('WhatsApp packs cap at 30 stickers')
 
   const packDir = path.join(DATA, 'packs', pack.code)
   fs.rmSync(packDir, { force: true, recursive: true })
   fs.mkdirSync(packDir, { recursive: true })
+
+  // A done job's WebM is immutable, so its built WebP is deterministic — cache it
+  // by jobId (outside packDir, which is wiped each build) so rebuilds only re-encode
+  // stickers that are actually new. ponytail: no pruning; orphaned entries are tiny.
+  const CACHE = path.join(DATA, 'webp-cache')
+  fs.mkdirSync(CACHE, { recursive: true })
 
   const stickers: Array<{ image_file: string; emojis: string[] }> = []
   for (const [i, job] of jobList.entries()) {
@@ -389,17 +401,24 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
       fs.copyFileSync(job.outputPath, outPath)
       console.log(`pack ${pack.code}: ${name} ← image ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
     } else {
-      // The WebM is already the finished 512² frame: crop, scale, trim, speed,
-      // border and audio are all baked in. Re-applying job.settings here would
-      // double-process them (original-source crop=720x712 on a 512² input =
-      // ffmpeg "size too big" crash). Only fps carries over, to step down under
-      // WhatsApp's 500KB WebP budget. ponytail: neutralized settings on purpose.
-      const result = await convertToAnimatedWebp({
-        inputPath: job.outputPath, outPath,
-        start: 0, end: job.outMeta!.duration, speed: 1, fps: job.settings.fps,
-        fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false
-      })
-      console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
+      const cached = path.join(CACHE, `${job.id}.webp`)
+      if (fs.existsSync(cached)) {
+        fs.copyFileSync(cached, outPath)
+        console.log(`pack ${pack.code}: ${name} ← cache ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
+      } else {
+        // The WebM is already the finished 512² frame: crop, scale, trim, speed,
+        // border and audio are all baked in. Re-applying job.settings here would
+        // double-process them (original-source crop=720x712 on a 512² input =
+        // ffmpeg "size too big" crash). Only fps carries over, to step down under
+        // WhatsApp's 500KB WebP budget. ponytail: neutralized settings on purpose.
+        const result = await convertToAnimatedWebp({
+          inputPath: job.outputPath, outPath,
+          start: 0, end: job.outMeta!.duration, speed: 1, fps: job.settings.fps,
+          fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false
+        })
+        fs.copyFileSync(outPath, cached)
+        console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
+      }
     }
     stickers.push({ image_file: name, emojis: [PACK_EMOJIS[i % PACK_EMOJIS.length]] })
   }
@@ -460,8 +479,12 @@ app.delete('/api/packs/:code', (req, res) => {
 app.put('/api/packs/:code/stickers', (req, res) => {
   const pack = ownedPack(req, req.params.code)
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
-  const jobIds = (Array.isArray(req.body.jobIds) ? req.body.jobIds.map(String) : [])
+  const valid = (Array.isArray(req.body.jobIds) ? req.body.jobIds.map(String) : [])
     .filter((id: string) => { const j = jobs.get(id); return j?.owner === req.userId && j.status === 'done' })
+  // One sticker per source file — drop a stale encode when a file was re-tuned.
+  const byFile = new Map<string, string>()
+  for (const id of valid) byFile.set(jobs.get(id)!.fileId, id)
+  const jobIds = [...byFile.values()]
   setPackStickers(pack.code, jobIds)
   res.json(packSummary({ ...pack, jobIds }))
 })
