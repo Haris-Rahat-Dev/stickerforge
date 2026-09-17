@@ -20,3 +20,6 @@ scripts/shots/
 .project
 .classpath
 .settings/
+
+# backup config (namespace/bucket)
+.backup.env
