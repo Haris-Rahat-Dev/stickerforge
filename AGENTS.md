@@ -90,7 +90,7 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 
 - `npm run dev` dies if the API process is killed; Vite alone is a blank proxy. Hard-refresh (⌘⇧R) after CSS/geometry fixes.
 - E2E samples are specific files in `~/Downloads`; missing files → suite fails at upload.
-- Pack WebP is built from **already-converted WebM** plus original settings — don’t “fix” that without checking double-crop/double-speed.
+- Pack WebP is built from the **already-converted WebM** (crop/scale/trim/speed/border/audio all baked in). The WebP pass must re-apply **none** of `job.settings` — only carry `fps` for the 500KB budget. Spreading `...job.settings` double-processes (original-source `crop` on the 512² WebM → ffmpeg “size too big”; also double-trim/double-speed). See `assemblePack` in `index.ts`.
 - `adb push` files are invisible to Sticker.ly until a media scan (`adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE`).
 - WhatsApp’s built-in sticker maker re-crops; edge text dies without the white-border toggle.
 - Duplicate identical WebMs can be rejected by importer apps.
@@ -111,6 +111,7 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 - Prefer Tailscale private access for the hosted app; keep public HTTP closed when Tailscale is up.
 - Prefer generic host/device copy in UI and docs — no Mac- or USB-specific wording.
 - For the Ampere Cursor Automation, put OCI credentials as Runtime Secrets on the selected Cloud Environment (not Build Secrets); redacted values still mean present.
+- Never search/enumerate credential files on disk (`find`/`mdfind`/broad `ls` for `*.pem`, keys, `.env`, etc.); ask for an exact path or have the user paste — EDR treats that hunt as sensitive-data enumeration.
 
 ## Learned Workspace Facts
 
@@ -121,3 +122,5 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 - Hosted access is Tailscale-only once public `:3210` is closed; laptop and phone both need Tailscale on the same account.
 - Android debug builds bake `API_BASE` to the Tailscale host so pack fetch works without USB/`adb reverse`.
 - Web deploy to the VM is still manual (`npm run build` → rsync `web/dist` → restart `stickerforge`); no CI/push-to-deploy yet.
+- Hosted backups: `backup.sh` does SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7; target bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal (see `docs/backups.md`).
+- OCI MCP “connected” only means the server process started; Object Storage/IAM calls still need a valid `OCI_CONFIG_PROFILE` with working API signing.

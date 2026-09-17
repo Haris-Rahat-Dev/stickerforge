@@ -389,7 +389,16 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
       fs.copyFileSync(job.outputPath, outPath)
       console.log(`pack ${pack.code}: ${name} ← image ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
     } else {
-      const result = await convertToAnimatedWebp({ inputPath: job.outputPath, outPath, ...job.settings, speed: job.settings.speed })
+      // The WebM is already the finished 512² frame: crop, scale, trim, speed,
+      // border and audio are all baked in. Re-applying job.settings here would
+      // double-process them (original-source crop=720x712 on a 512² input =
+      // ffmpeg "size too big" crash). Only fps carries over, to step down under
+      // WhatsApp's 500KB WebP budget. ponytail: neutralized settings on purpose.
+      const result = await convertToAnimatedWebp({
+        inputPath: job.outputPath, outPath,
+        start: 0, end: job.outMeta!.duration, speed: 1, fps: job.settings.fps,
+        fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false
+      })
       console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
     }
     stickers.push({ image_file: name, emojis: [PACK_EMOJIS[i % PACK_EMOJIS.length]] })
