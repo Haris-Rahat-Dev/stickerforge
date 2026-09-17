@@ -107,11 +107,17 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 - Prefer Cursor Automations over local LaunchAgents/nohup for recurring OCI capacity retries.
 - For simple automations, prefer the cheapest standard model (Composer 2.5), not Fast variants.
 - When Always Free Ampere capacity appears, launch and hold the VM — do not only notify.
-- Push this repo with the Haris-Rahat-Dev GitHub account.
+- Push this repo with the Haris-Rahat-Dev GitHub account. Workflow for any commit/push here: `gh auth switch --user Haris-Rahat-Dev` → commit → push, then `gh auth switch --user Haris-Rahat` (the default) to leave the active account unchanged so other repos/workflows aren't affected. Do not add a Claude co-author / attribution line to commit messages.
+- Prefer Tailscale private access for the hosted app; keep public HTTP closed when Tailscale is up.
+- Prefer generic host/device copy in UI and docs — no Mac- or USB-specific wording.
+- For the Ampere Cursor Automation, put OCI credentials as Runtime Secrets on the selected Cloud Environment (not Build Secrets); redacted values still mean present.
 
 ## Learned Workspace Facts
 
 - Hosted StickerForge needs a long-running VM with ffmpeg/cwebp/webpmux; SQLite + local disk is enough for v1.
 - OCI home region for this project is `ap-mumbai-1`; Always Free Ampere A1 Flex is often out of capacity there.
 - When A1 is unavailable, Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg).
-- Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold), not a checked-in local loop.
+- Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold, ~every 5 minutes), not a checked-in local loop.
+- Hosted access is Tailscale-only once public `:3210` is closed; laptop and phone both need Tailscale on the same account.
+- Android debug builds bake `API_BASE` to the Tailscale host so pack fetch works without USB/`adb reverse`.
+- Web deploy to the VM is still manual (`npm run build` → rsync `web/dist` → restart `stickerforge`); no CI/push-to-deploy yet.
