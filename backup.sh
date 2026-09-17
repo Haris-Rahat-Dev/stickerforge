@@ -5,6 +5,7 @@
 #   SF_BACKUP_BUCKET  bucket name (default: stickerforge-backups)
 #   SF_BACKUP_KEEP    how many to retain (default: 7)
 set -euo pipefail
+export PATH="$HOME/bin:$PATH"   # oci CLI lives in ~/bin; cron's PATH is minimal
 cd "$(dirname "$0")"
 [ -f .backup.env ] && source .backup.env
 
