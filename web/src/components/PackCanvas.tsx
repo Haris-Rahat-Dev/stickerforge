@@ -72,7 +72,7 @@ export default function PackCanvas(props: {
         </div>
         {buildError && <div className="pack-err">✗ {buildError}</div>}
         {pack.built && props.onShowInstall && !props.installOpen && (
-          <button className="btn btn-ghost btn-sm" type="button" style={{ marginLeft: 8 }} onClick={() => props.onShowInstall()}>Show install</button>
+          <button className="btn btn-ghost btn-sm" type="button" style={{ marginLeft: 8 }} onClick={() => props.onShowInstall?.()}>Show install</button>
         )}
         <button className="btn btn-primary" disabled={!!reason || building} onClick={props.onBuild}>
           {building ? 'Building pack…' : pack.built ? '↻ Rebuild pack' : '⚡ Build pack'}
