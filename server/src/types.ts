@@ -82,6 +82,9 @@ export interface Job {
   settings: ConvertSettings
   startedAt: number
   sizeBytes?: number
+  /** WhatsApp WebP size/fps once the AnimEncoder pass has run. */
+  webpBytes?: number
+  webpFps?: number
   outMeta?: VideoMeta | null
   error?: string
   /** 1–3 emojis for the WhatsApp manifest. Absent means "not chosen yet". */

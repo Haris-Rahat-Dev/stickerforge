@@ -69,6 +69,8 @@ export interface Job {
   stage: string
   settings: ConvertSettings
   sizeBytes?: number
+  webpBytes?: number
+  webpFps?: number
   outMeta?: VideoMeta | null
   trayPath?: string | null
   error?: string

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { outputPreviewUrl } from '../api.js'
+import StickerPreview from './StickerPreview.jsx'
 import type { StickerView } from '../types.js'
 
 const MIN = 3
@@ -46,15 +46,7 @@ export default function StickerSheet({ stickers, onReorder, onFineTune, onReplac
             onDrop={e => { e.preventDefault(); dropOn(s.jobId) }}
           >
             <div className="thumb square">
-              <video
-                className="thumb-cover"
-                src={outputPreviewUrl(s.jobId)}
-                muted
-                loop
-                autoPlay
-                playsInline
-                preload="metadata"
-              />
+              <StickerPreview jobId={s.jobId} className="thumb-cover" />
               <span className="sticker-emoji">{s.emojis[0]}</span>
               {!s.editable && <span className="status-chip locked" title="Source deleted at build">🔒</span>}
             </div>

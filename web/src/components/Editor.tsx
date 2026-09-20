@@ -1,10 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, outputPreviewUrl, downloadWebm, downloadTray, detectCrop, watchJob } from '../api.js'
+import { videoUrl, filmstripUrl, convert, detectCrop, watchJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
+import { capFps, MAX_STICKER_SEC, motionBudget } from '../budget.js'
 import Timeline from './Timeline.jsx'
 
 const MIN_SPAN = 0.3
 const MAX_OUT_DUR = 6
+
+function squareCrop(w: number, h: number): CropRect {
+  const s = Math.min(w, h)
+  return { w: s, h: s, x: Math.round((w - s) / 2), y: Math.round((h - s) / 2) }
+}
+
+function squareInside(r: CropRect): CropRect {
+  const s = Math.min(r.w, r.h)
+  return { w: s, h: s, x: r.x + Math.round((r.w - s) / 2), y: r.y + Math.round((r.h - s) / 2) }
+}
 
 export default function Editor({
   file,
@@ -19,29 +30,29 @@ export default function Editor({
 }) {
   const meta = file.meta
   const duration = Math.max(meta.duration, 0.5)
+  const fps = capFps(meta.fps)
+  const isImage = file.kind === 'image'
 
   const [start, setStart] = useState(0)
-  const [end, setEnd] = useState(Math.min(6, duration))
-  const [speed, setSpeed] = useState(1)
-  const [fps, setFps] = useState(() => snapFps(meta.fps))
-  const [fit, setFit] = useState<FitMode>('cover')
-  const [padColor, setPadColor] = useState('#000000')
-  const [cropOn, setCropOn] = useState(false)
-  const [crop, setCrop] = useState<CropRect | null>(null)
+  const [end, setEnd] = useState(() => {
+    if (isImage) return duration
+    const keep = motionBudget(duration, meta.fps).maxSeconds
+    const joke = duration > 4 ? 4 : duration
+    return Math.min(duration, MAX_OUT_DUR, keep, joke)
+  })
+  const [crop, setCrop] = useState<CropRect>(() => squareCrop(meta.width, meta.height))
+  const [pad, setPad] = useState(false)
   const [cropDetecting, setCropDetecting] = useState(false)
-  const [cropPos] = useState(0.5)
   const [border, setBorder] = useState(false)
-  const [advanced, setAdvanced] = useState(false)
-  const [cropEdit, setCropEdit] = useState(false)
   const [stripUrl, setStripUrl] = useState<string | null>(null)
-  const [loopTrim, setLoopTrim] = useState(true)
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<Job | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const running = job?.status === 'running'
 
   useEffect(() => {
-    if (file.kind === 'image') return   // no timeline for stills
+    if (isImage) return
     let url: string | null = null
     let cancelled = false
     filmstripUrl(file.id).then(u => {
@@ -51,23 +62,27 @@ export default function Editor({
       cancelled = true
       if (url) URL.revokeObjectURL(url)
     }
-  }, [file.id])
+  }, [file.id, isImage])
 
   useEffect(() => {
     if (!jobId) return
     void watchJob(jobId, j => setJob(prev => prev ? { ...prev, progress: j.progress, stage: j.stage } : prev))
       .then(j => {
-        setJob(prev => prev ? { ...prev, status: 'done', sizeBytes: j.sizeBytes } : prev)
         onAddedToPack?.(jobId, j.sizeBytes, replaceAt)
       })
-      .catch(() => {})
+      .catch(err => {
+        setJob({
+          status: 'error',
+          error: err instanceof Error ? err.message : 'failed',
+          progress: 0, stage: '', id: jobId, fileId: file.id,
+          settings: {} as ConvertRequest,
+        })
+      })
   }, [jobId, replaceAt])
 
   useEffect(() => {
     const v = videoRef.current
-    if (!v) return
-    if (!loopTrim) { v.pause(); return }
-    v.playbackRate = speed
+    if (!v || isImage) return
     const onTick = () => {
       if (v.currentTime >= end - 0.03 || v.currentTime < start - 0.4) v.currentTime = start
     }
@@ -75,344 +90,132 @@ export default function Editor({
     v.play().catch(() => {})
     v.addEventListener('timeupdate', onTick)
     return () => v.removeEventListener('timeupdate', onTick)
-  }, [loopTrim, start, end, speed])
+  }, [start, end, isImage])
 
-  const maxSpan = Math.min(MAX_OUT_DUR * speed, duration)
-  const outDur = (end - start) / speed
+  const outDur = end - start
+  const budget = motionBudget(outDur, meta.fps)
+  const maxSpan = Math.min(MAX_STICKER_SEC, duration)
+  const srcAspect = meta.width / meta.height
+  const needsFraming = Math.abs(srcAspect - 1) > 0.02
+  const fit: FitMode = pad ? 'contain' : 'cover'
 
   const setRange = (s: number, e: number): void => {
     let span = e - s
-    if (span > maxSpan) {
-      span = maxSpan
-      e = s + span
-      if (e > duration) { e = duration; s = Math.max(0, e - span) }
-    }
     if (span < MIN_SPAN) { e = s + MIN_SPAN; if (e > duration) { e = duration; s = Math.max(0, e - MIN_SPAN) } }
     setStart(s); setEnd(e)
   }
 
-  const changeSpeed = (v: number): void => {
-    const ms = Math.min(MAX_OUT_DUR * v, duration)
-    const mid = (start + end) / 2
-    const s = Math.max(0, Math.min(duration - ms, mid - ms / 2))
-    setSpeed(v)
-    setStart(s)
-    setEnd(s + ms)
+  const keepMotion = (): void => {
+    const span = Math.min(budget.maxSeconds, duration - start)
+    let s = start
+    let e = s + span
+    if (e > duration) { e = duration; s = Math.max(0, e - span) }
+    setStart(s); setEnd(e)
   }
 
-  const activeCrop = cropOn && crop ? crop : null
-
   const doConvert = async (): Promise<void> => {
-    setJob({ status: 'running', progress: 0, stage: 'starting', id: '', fileId: file.id, settings: {} as ConvertRequest } as Job)
+    if (!isImage && !budget.ok) return
+    setJob({ status: 'running', progress: 0, stage: 'starting', id: '', fileId: file.id, settings: {} as ConvertRequest })
     try {
-      const id = await convert({ fileId: file.id, start, end, speed, fps, fit, padColor, crop: activeCrop, cropPos, border })
+      const id = await convert({
+        fileId: file.id, start, end, speed: 1, fps, fit,
+        padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
+      })
       setJobId(id)
     } catch (err) {
       setJob({ status: 'error', error: err instanceof Error ? err.message : 'failed', progress: 0, stage: '', id: '', fileId: file.id, settings: {} as ConvertRequest })
     }
   }
 
-  const reset = (): void => { setJob(null); setJobId(null) }
-
-  const isImage = file.kind === 'image'
-  // Cover can only pan when the (optionally black-border-cropped) source isn't
-  // already square — a square source fills the sticker exactly, nothing to crop.
-  const srcAspect = (activeCrop?.w ?? meta.width) / (activeCrop?.h ?? meta.height)
-  // A square source fills the sticker exactly — Crop and Pad give the same result,
-  // so there's no framing decision to make (and nothing to pan).
-  const needsFraming = Math.abs(srcAspect - 1) > 0.02
-  const qualityChip = QUALITY[file.quality.level] ?? QUALITY.ok
-
   return (
     <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="modal">
+      <div className="modal editor-modal">
         <div className="modal-head">
           <div>
             <h2 title={file.originalName}>{file.originalName}</h2>
             <span className="meta-line">
               {isImage
-                ? `image · ${meta.width}×${meta.height} · ${(file.sizeBytes / 1024).toFixed(0)}KB`
-                : `${meta.width}×${meta.height} · ${Math.round(meta.fps)}fps · ${meta.duration.toFixed(1)}s · ${(file.sizeBytes / 1024 / 1024).toFixed(1)}MB${meta.hasAudio ? ' · 🔊 audio (will be stripped)' : ''}`}
+                ? `image · ${meta.width}×${meta.height}`
+                : `${meta.width}×${meta.height} · ${fps}fps · drag the box to reframe`}
             </span>
           </div>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </div>
 
-        <div className="quality-strip">
-          <span className={`chip chip-${file.quality.level}`}>{qualityChip.label}</span>
-          {file.quality.notes.map((n, i) => (
-            <span key={i} className={`note note-${n.type}`}>{n.msg}</span>
-          ))}
-        </div>
-
-        {!job || job.status === 'running' ? (
-          <div className="editor-body">
-            <div className="preview-col">
-              <div
-                className="stage-outer"
-                style={border ? { background: '#ffffff', padding: '5.08%' } : undefined}
-              >
-                <div
-                  className="stage"
-                  style={!cropEdit && fit === 'contain' ? { background: padColor } : undefined}
-                >
-                  {cropEdit ? (
-                    <>
-                      {isImage ? (
-                        <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
-                      ) : (
-                        <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />
-                      )}
-                      {crop && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
-                    </>
-                  ) : (
-                    <div style={frameStyle(fit, meta, activeCrop, cropPos)}>
-                      {isImage ? (
-                        <img src={videoUrl(file.id)} style={videoStyle(meta, activeCrop)} alt={file.originalName} />
-                      ) : (
-                        <video
-                          ref={videoRef}
-                          src={videoUrl(file.id)}
-                          muted playsInline loop autoPlay preload="auto"
-                          style={videoStyle(meta, activeCrop)}
-                        />
-                      )}
-                    </div>
-                  )}
-                </div>
+        <div className="editor-body editor-solo">
+          <div className="preview-col">
+            <div className="stage-outer" style={border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
+              <div className="stage">
+                {isImage
+                  ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
+                  : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />}
+                {!pad && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
               </div>
-              {!isImage && (
-                <>
-                  <Timeline duration={duration} start={start} end={end} stripUrl={stripUrl} maxSpan={maxSpan} onChange={setRange} />
-                  <div className="trim-tools">
-                    <button className={`btn btn-ghost btn-sm ${loopTrim ? 'active' : ''}`} onClick={() => setLoopTrim(!loopTrim)}>
-                      {loopTrim ? '⏹ Stop loop' : '▶ Loop trim'}
-                    </button>
-                    <span className="out-dur">Output: <b>{outDur.toFixed(2)}s</b> @ {fps}fps</span>
-                  </div>
-                </>
-              )}
             </div>
 
-            <div className="controls-col">
-              {needsFraming ? (
-                <>
-                  <label className="ctl-label">Framing</label>
-                  <div className="seg">
-                    {([['cover', 'Crop'], ['contain', 'Pad']] as Array<[FitMode, string]>).map(([val, label]) => (
-                      <button key={val} className={`seg-btn ${fit === val ? 'active' : ''}`} onClick={() => setFit(val)}>{label}</button>
-                    ))}
-                  </div>
-                  {fit === 'contain' && (
-                    <div className="swatches">
-                      {['#000000', '#ffffff', '#25d366', '#128c7e', '#ece5dd'].map(c => (
-                        <button key={c} className={`swatch ${padColor === c ? 'active' : ''}`} style={{ background: c }} onClick={() => setPadColor(c)} />
-                      ))}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <span className="note">Square source — fills the sticker exactly, no framing needed.</span>
+            <div className="stage-tools">
+              {needsFraming && (
+                <div className="seg">
+                  <button className={`seg-btn ${!pad ? 'active' : ''}`} onClick={() => { setPad(false); setCrop(squareCrop(meta.width, meta.height)) }}>Crop</button>
+                  <button className={`seg-btn ${pad ? 'active' : ''}`} onClick={() => setPad(true)}>Fit whole</button>
+                </div>
               )}
-
-              <button
-                className={`btn btn-ghost btn-sm crop-toggle ${cropEdit ? 'active' : ''}`}
-                onClick={() => {
-                  if (cropEdit) { setCropEdit(false); return }
-                  if (!crop) {
-                    const s = Math.min(meta.width, meta.height)
-                    setCrop({ w: s, h: s, x: Math.round((meta.width - s) / 2), y: Math.round((meta.height - s) / 2) })
-                  }
-                  setCropOn(true); setFit('cover'); setCropEdit(true)
-                }}
-                title="Drag a box on the preview to crop / reframe — cut watermarks, edge text, whatever you want out"
-              >
-                {cropEdit ? '✓ Done cropping' : '✂ Crop / reframe'}
-              </button>
-
-              {cropEdit && (
-                <div className="crop-controls">
-                  <span className="crop-hint">Drag the box · corners &amp; edges resize</span>
+              {!pad && (
+                <>
                   <button className="btn btn-ghost btn-sm" disabled={cropDetecting} onClick={async () => {
                     setCropDetecting(true)
                     const c = await detectCrop(file.id).catch(() => null)
-                    if (c) setCrop(c)
+                    setCrop(c ? squareInside(c) : squareCrop(meta.width, meta.height))
                     setCropDetecting(false)
-                  }}>{cropDetecting ? '⏳ Detecting…' : '⌖ Auto (black borders)'}</button>
-                  <button className="btn btn-ghost btn-sm" onClick={() => {
-                    const s = Math.min(meta.width, meta.height)
-                    setCrop({ w: s, h: s, x: Math.round((meta.width - s) / 2), y: Math.round((meta.height - s) / 2) })
-                  }}>↺ Reset crop</button>
-                </div>
+                  }}>{cropDetecting ? 'Detecting…' : 'Auto black borders'}</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setCrop(squareCrop(meta.width, meta.height))}>Reset crop</button>
+                </>
               )}
-              {cropEdit && crop && Math.abs(crop.w / crop.h - 1) > 0.02 && (
-                <div className="crop-fill">
-                  <span className="ctl-label">Non-square selection — fill the sticker by:</span>
-                  <div className="seg">
-                    {([['cover', 'Crop'], ['contain', 'Pad']] as Array<[FitMode, string]>).map(([val, label]) => (
-                      <button key={val} className={`seg-btn ${fit === val ? 'active' : ''}`} onClick={() => setFit(val)}>{label}</button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {cropOn && crop && !cropEdit && (
-                <span className="note note-good">Cropped to {crop.w}×{crop.h} · <button className="linkbtn" onClick={() => { setCropOn(false); setCrop(null) }}>clear</button></span>
-              )}
-
               <button
-                className={`btn btn-ghost btn-sm crop-toggle ${border ? 'active' : ''}`}
+                className={`btn btn-ghost btn-sm ${border ? 'active' : ''}`}
                 onClick={() => setBorder(!border)}
-                title="Insets the sticker with a white frame so WhatsApp's rounded corners and re-crops never clip your content"
-              >
-                {border ? '⬜ White border on' : '⬜ White border (safe zone)'}
-              </button>
-
-              {!isImage && (
-                <div className="advanced">
-                  <button className="btn btn-ghost btn-sm adv-toggle" onClick={() => setAdvanced(a => !a)}>
-                    {advanced ? '▾' : '▸'} Advanced — speed &amp; frame rate
-                  </button>
-                  {advanced && (
-                    <div className="adv-body">
-                      <label className="ctl-label">Speed — squeeze long moments into 6s</label>
-                      <div className="speed-row">
-                        <input type="range" min={0.25} max={4} step={0.25} value={speed} onChange={e => changeSpeed(parseFloat(e.target.value))} />
-                        <span className="speed-val">{speed}×</span>
-                      </div>
-
-                      <label className="ctl-label">Frame rate</label>
-                      <select value={fps} onChange={e => setFps(parseInt(e.target.value, 10))}>
-                        {fpsOptions(meta.fps).map(f => <option key={f} value={f}>{f} fps</option>)}
-                      </select>
-
-                      <div className="frame-estimate">
-                        ~{Math.max(1, Math.round(outDur * fps))} frames · ~{(470 / Math.max(1, outDur * fps)).toFixed(1)}KB each
-                        {outDur * fps > 150 ? ' · softer' : ' · sharp'}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="spec-hint">{isImage ? '→ still → motionless animated WebP · 512×512' : '→ WebM/VP9 · 512×512 · ≤30fps · ≤6s · <500KB · silent'}</div>
-
-              <button className="btn btn-primary convert-btn" disabled={!!job && job.status === 'running'} onClick={doConvert}>
-                {job?.status === 'running' ? `Encoding… ${Math.round((job.progress || 0) * 100)}%` : '⚡ Add to pack'}
-              </button>
-              {job?.status === 'running' && (
-                <div className="progress"><div className="progress-fill" style={{ width: `${Math.round(job.progress * 100)}%` }} /></div>
-              )}
-              {job?.status === 'error' && <div className="error-box">{job.error}</div>}
+                title="Insets content so WhatsApp's rounded corners don't clip edge text"
+              >{border ? 'White border on' : 'White border'}</button>
             </div>
+
+            {!isImage && (
+              <>
+                <Timeline duration={duration} start={start} end={end} stripUrl={stripUrl} maxSpan={maxSpan} onChange={setRange} />
+                <div className={`budget ${!budget.ok || budget.tight ? 'budget-over' : ''}`}>
+                  {!budget.ok
+                    ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s</span>
+                    : budget.tight
+                    ? (
+                      <>
+                        <span>{outDur.toFixed(1)}s may not fit if it's all motion — holds are free</span>
+                        <button className="btn btn-sm" onClick={keepMotion}>Safer trim · {budget.maxSeconds.toFixed(1)}s</button>
+                      </>
+                    )
+                    : <span>{outDur.toFixed(1)}s · {fps}fps WhatsApp</span>}
+                </div>
+              </>
+            )}
+
+            <button
+              className="btn btn-primary convert-btn"
+              disabled={running || (!isImage && !budget.ok)}
+              onClick={doConvert}
+            >
+              {running ? `Encoding… ${Math.round((job?.progress || 0) * 100)}%` : 'Add to pack'}
+            </button>
+            {running && (
+              <div className="progress"><div className="progress-fill" style={{ width: `${Math.round((job?.progress || 0) * 100)}%` }} /></div>
+            )}
+            {job?.status === 'error' && <div className="error-box">{job.error}</div>}
           </div>
-        ) : job.status === 'done' ? (
-          <ResultPanel job={job} jobId={jobId!} name={file.originalName.replace(/\.[^.]+$/, '')} onBack={reset} />
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
-interface ResultPanelProps {
-  job: Job
-  jobId: string
-  name: string
-  onBack: () => void
-}
-
-function ResultPanel({ job, jobId, name, onBack }: ResultPanelProps) {
-  const m = job.outMeta
-  return (
-    <div className="result">
-      <div className="result-preview">
-        <video src={outputPreviewUrl(jobId)} autoPlay loop muted playsInline />
-      </div>
-      <div className="result-info">
-        <div className="result-title">✅ Sticker ready</div>
-        <ul className="result-specs">
-          <li>{(job.sizeBytes ?? 0) / 1024 | 0} KB <Check ok={(job.sizeBytes ?? Infinity) < 500 * 1024} req="<500 KB" /></li>
-          {m && (
-            <>
-              <li>{m.width}×{m.height} <Check ok={m.width <= 512 && m.height <= 512} req="≤512px" /></li>
-              <li>{Math.round(m.fps)} fps <Check ok={m.fps <= 30.01} req="≤30fps" /></li>
-              <li>{m.duration.toFixed(2)}s <Check ok={m.duration <= 6.05} req="≤6s" /></li>
-              <li>{m.codec.toUpperCase()} <Check ok={m.codec === 'vp9'} req="VP9" /></li>
-            </>
-          )}
-        </ul>
-        <div className="result-actions">
-          <button className="btn btn-primary" onClick={() => downloadWebm(jobId, name)}>⬇ WebM</button>
-          <button className="btn" onClick={() => downloadTray(jobId, name)} disabled={!job.trayPath}>⬇ Tray PNG</button>
-          <button className="btn btn-ghost" onClick={onBack}>↺ Re-adjust</button>
         </div>
-        <p className="tray-note">WhatsApp packs need one static tray icon per pack — grab it from any sticker.</p>
       </div>
     </div>
   )
-}
-
-function Check({ ok, req }: { ok: boolean; req: string }) {
-  return <span className={`check ${ok ? 'ok' : 'bad'}`}>{ok ? '✓' : '✗'} {req}</span>
-}
-
-function snapFps(srcFps: number): number {
-  const r = Math.max(10, Math.min(30, Math.round(srcFps)))
-  const opts = fpsOptions(srcFps)
-  return opts.reduce((best, f) => Math.abs(f - r) < Math.abs(best - r) ? f : best, opts[0])
-}
-
-function fpsOptions(srcFps: number): number[] {
-  const base = [10, 15, 20, 24, 30]
-  const src = Math.round(srcFps * 100) / 100
-  const all = [...new Set([...base.filter(f => f <= Math.max(10, src)), Math.min(30, Math.round(src))])]
-  return all.sort((a, b) => a - b)
-}
-
-interface FrameBox {
-  width: string
-  height: string
-  left: string
-  top: string
-  transform?: string
-}
-
-function frameStyle(fit: FitMode, meta: FileRecord['meta'], crop: CropRect | null, cropPos = 0.5): FrameBox {
-  const cw = crop?.w || meta.width
-  const ch = crop?.h || meta.height
-  const r = cw / ch
-  const p = Math.min(1, Math.max(0, cropPos ?? 0.5))
-  if (fit === 'stretch') return { width: '100%', height: '100%', left: '0%', top: '0%' }
-  if (fit === 'cover') {
-    if (r >= 1) {
-      const overflow = r - 1
-      return { width: `${r * 100}%`, height: '100%', left: `${-p * overflow * 100}%`, top: '0%' }
-    }
-    const overflow = 1 / r - 1
-    return { width: '100%', height: `${(1 / r) * 100}%`, left: '0%', top: `${-p * overflow * 100}%` }
-  }
-  return r >= 1
-    ? { width: '100%', height: `${(1 / r) * 100}%`, left: '0%', top: '50%', transform: 'translateY(-50%)' }
-    : { width: `${r * 100}%`, height: '100%', left: '50%', top: '0%', transform: 'translateX(-50%)' }
-}
-
-function videoStyle(meta: FileRecord['meta'], crop: CropRect | null): React.CSSProperties {
-  const cw = crop?.w || meta.width
-  const ch = crop?.h || meta.height
-  const x = crop?.x || 0
-  const y = crop?.y || 0
-  return {
-    width: `${(meta.width / cw) * 100}%`,
-    height: `${(meta.height / ch) * 100}%`,
-    left: `${-(x / cw) * 100}%`,
-    top: `${-(y / ch) * 100}%`,
-    objectFit: 'fill'
-  }
 }
 
 const clampN = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 
-// Draggable / resizable crop box over the full frame (shown at contain scale in the
-// square stage). Emits a source-pixel crop rect the encoder already understands.
 function CropBox({ meta, crop, onChange }: {
   meta: { width: number; height: number }
   crop: CropRect
@@ -429,7 +232,7 @@ function CropBox({ meta, crop, onChange }: {
     height: `${(crop.h / H) * dispH}%`
   }
 
-  const drag = (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w') => (e: React.PointerEvent) => {
+  const drag = (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => (e: React.PointerEvent) => {
     e.preventDefault(); e.stopPropagation()
     const stage = (e.currentTarget as HTMLElement).closest('.stage') as HTMLElement
     const rect = stage.getBoundingClientRect()
@@ -441,22 +244,26 @@ function CropBox({ meta, crop, onChange }: {
     const onMove = (ev: PointerEvent): void => {
       const dx = (ev.clientX - sx) / pxX
       const dy = (ev.clientY - sy) / pxY
-      let n: CropRect
       if (mode === 'move') {
-        n = { ...o, x: Math.round(clampN(o.x + dx, 0, W - o.w)), y: Math.round(clampN(o.y + dy, 0, H - o.h)) }
-      } else if (mode === 'e' || mode === 'w') {   // horizontal edge — width only
-        const w = clampN(mode === 'e' ? o.w + dx : o.w - dx, 24, mode === 'e' ? W - o.x : right)
-        n = { y: o.y, h: o.h, w: Math.round(w), x: Math.round(mode === 'e' ? o.x : right - w) }
-      } else if (mode === 'n' || mode === 's') {   // vertical edge — height only
-        const h = clampN(mode === 's' ? o.h + dy : o.h - dy, 24, mode === 's' ? H - o.y : bottom)
-        n = { x: o.x, w: o.w, h: Math.round(h), y: Math.round(mode === 's' ? o.y : bottom - h) }
-      } else {                                      // corner — free both axes
-        const east = mode.includes('e'), south = mode.includes('s')
-        const w = clampN(east ? o.w + dx : o.w - dx, 24, east ? W - o.x : right)
-        const h = clampN(south ? o.h + dy : o.h - dy, 24, south ? H - o.y : bottom)
-        n = { w: Math.round(w), h: Math.round(h), x: Math.round(east ? o.x : right - w), y: Math.round(south ? o.y : bottom - h) }
+        onChange({ ...o, x: Math.round(clampN(o.x + dx, 0, W - o.w)), y: Math.round(clampN(o.y + dy, 0, H - o.h)) })
+        return
       }
-      onChange(n)
+      const east = mode.includes('e'), south = mode.includes('s')
+      const raw = east ? o.w + dx : o.w - dx
+      const rawH = south ? o.h + dy : o.h - dy
+      let side = Math.round((Math.abs(raw) + Math.abs(rawH)) / 2)
+      let x = east ? o.x : right - side
+      let y = south ? o.y : bottom - side
+      if (x < 0) { side += x; x = 0 }
+      if (y < 0) { side += y; y = 0 }
+      if (x + side > W) side = W - x
+      if (y + side > H) side = H - y
+      side = Math.max(24, side)
+      x = east ? o.x : right - side
+      y = south ? o.y : bottom - side
+      x = Math.round(clampN(x, 0, W - side))
+      y = Math.round(clampN(y, 0, H - side))
+      onChange({ w: side, h: side, x, y })
     }
     const onUp = (): void => {
       window.removeEventListener('pointermove', onMove)
@@ -471,16 +278,6 @@ function CropBox({ meta, crop, onChange }: {
       {(['nw', 'ne', 'sw', 'se'] as const).map(h => (
         <span key={h} className={`crop-handle ${h}`} onPointerDown={drag(h)} />
       ))}
-      {/* edge handles for independent width/height crop */}
-      {(['n', 's', 'e', 'w'] as const).map(h => (
-        <span key={h} className={`crop-handle edge ${h}`} onPointerDown={drag(h)} />
-      ))}
     </div>
   )
-}
-
-const QUALITY: Record<string, { label: string }> = {
-  good: { label: '✓ Great source' },
-  ok: { label: '~ Usable' },
-  warn: { label: '! Rough source' },
 }

@@ -38,7 +38,7 @@ export function stickerView(job: Job, source: FileRecord | undefined): StickerVi
     fileId: job.fileId,
     kind: job.kind,
     name: source?.originalName ?? `sticker-${job.id.slice(0, 8)}`,
-    sizeBytes: job.sizeBytes,
+    sizeBytes: job.webpBytes ?? job.sizeBytes,
     editable: isEditable(job, source),
     emojis: normaliseEmojis(job.emojis),
   }

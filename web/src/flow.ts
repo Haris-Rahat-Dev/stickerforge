@@ -26,6 +26,7 @@ export type Action =
   | { type: 'closePack' }
   | { type: 'openStickers' }
   | { type: 'staged'; files: FileRecord[] }
+  | { type: 'setStaged'; files: FileRecord[] }
   | { type: 'discard'; fileId: string }
   | { type: 'committed'; fileId: string }
   | { type: 'uploadStart'; upload: UploadProgress }
@@ -61,6 +62,8 @@ export function reducer(s: FlowState, a: Action): FlowState {
       return { ...s, route: 'stickers', activeCode: null, staged: [], installOpen: false }
     case 'staged':
       return { ...s, staged: [...s.staged, ...a.files] }
+    case 'setStaged':
+      return { ...s, staged: a.files }
     case 'discard':
     case 'committed':
       return {
@@ -124,6 +127,12 @@ export const activePack = (s: FlowState): PackSummary | null =>
   s.packs.find(p => p.code === s.activeCode) ?? null
 
 export const stagedCount = (s: FlowState): number => s.staged.length + s.uploading.length
+
+/** Uncommitted uploads: on disk, not already a sticker in this pack. */
+export function shelfFiles(files: FileRecord[], packFileIds: string[]): FileRecord[] {
+  const used = new Set(packFileIds)
+  return files.filter(f => !used.has(f.id))
+}
 
 // Client-side filter over name, emojis, and the names of packs holding this sticker.
 export function matchesQuery(s: StickerView, q: string, packNames: string[] = []): boolean {

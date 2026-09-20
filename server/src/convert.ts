@@ -21,13 +21,13 @@ export function buildFilters(fit: FitMode, padColor = '#000000', cropPos = 0.5, 
   switch (fit) {
     case 'contain': {
       const c = (padColor || '#000000').replace('#', '')
-      return `scale=${S}:${S}:force_original_aspect_ratio=decrease,pad=${S}:${S}:(ow-iw)/2:(oh-ih)/2:color=0x${c}${whitePad},format=yuv420p`
+      return `scale=${S}:${S}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${S}:${S}:(ow-iw)/2:(oh-ih)/2:color=0x${c}${whitePad},format=yuv420p`
     }
     case 'stretch':
-      return `scale=${S}:${S}${whitePad},format=yuv420p`
+      return `scale=${S}:${S}:flags=lanczos${whitePad},format=yuv420p`
     case 'cover':
     default:
-      return `scale=${S}:${S}:force_original_aspect_ratio=increase,crop=${S}:${S}:(iw-${S})*${pos}:(ih-${S})*${pos}${whitePad},format=yuv420p`
+      return `scale=${S}:${S}:force_original_aspect_ratio=increase:flags=lanczos,crop=${S}:${S}:(iw-${S})*${pos}:(ih-${S})*${pos}${whitePad},format=yuv420p`
   }
 }
 

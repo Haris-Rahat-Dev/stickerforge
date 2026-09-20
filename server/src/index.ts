@@ -5,8 +5,9 @@ import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
-import { convertToSticker, computeBitrateKbps, extractTray } from './convert.js'
+import { convertToSticker, extractTray } from './convert.js'
 import { convertToAnimatedWebp, imageToAnimatedWebp } from './webp.js'
+import { capFps, motionBudget } from './budget.js'
 import { createLimiter } from './queue.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
   createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion,
@@ -23,9 +24,12 @@ const DATA = process.env.DATA_DIR || path.join(ROOT, 'data')
 const UPLOADS = path.join(DATA, 'uploads')
 const OUTPUTS = path.join(DATA, 'outputs')
 const TRAYS = path.join(DATA, 'trays')
+const WEB_CACHE = path.join(DATA, 'webp-cache')
 const WEB_DIST = path.join(ROOT, 'web', 'dist')
 
-for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS]) fs.mkdirSync(dir, { recursive: true })
+for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS, WEB_CACHE]) fs.mkdirSync(dir, { recursive: true })
+
+const webpCachePath = (jobId: string): string => path.join(WEB_CACHE, `${jobId}.webp`)
 
 // Safety net: a stray rejected promise (e.g. an ffmpeg failure in an async route)
 // must never take the whole server down. Log and keep serving.
@@ -118,7 +122,7 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
     start: Math.max(0, Number(body.start) || 0),
     end: Math.min(Number(body.end) || Math.min(6, duration), duration || 6),
     speed: Math.min(4, Math.max(0.25, Number(body.speed) || 1)),
-    fps: Math.min(30, Math.max(8, Math.round(Number(body.fps) || Math.min(30, rec.meta.fps)))),
+    fps: capFps(Number(body.fps) || rec.meta.fps),
     fit,
     padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
     crop: sanitizeCrop(body.crop as Partial<CropRect> | null, rec.meta),
@@ -236,8 +240,8 @@ app.get('/api/cropdetect/:id', async (req, res) => {
 
 function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null): Job {
   const jobId = crypto.randomUUID()
-  // Videos become a WebM (re-encoded to WebP at pack build); images become the
-  // motionless animated WebP directly (VP9 can hang on a still).
+  // Videos: WebM for Sticker.ly, then img2webp cache for WhatsApp. Images skip VP9
+  // (libvpx can hang on a still) and write the motionless animated WebP directly.
   const outputPath = path.join(OUTPUTS, `${jobId}.${rec.kind === 'image' ? 'webp' : 'webm'}`)
   const job: Job = {
     id: jobId,
@@ -257,15 +261,31 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
 
   const task = rec.kind === 'image'
     ? () => imageToAnimatedWebp({ inputPath: rec.path, outPath: outputPath, start, end, fps, fit, padColor, crop, cropPos, border })
-    : () => convertToSticker(
-        { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
-        signal,
-        p => {
-          job.progress = Math.min(0.99, Math.max(job.progress, p))
-          job.stage = 'encoding'
-          publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
-        }
-      )
+    : async () => {
+        job.stage = 'webp'
+        publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
+        // WhatsApp WebP from the original, not the VP9 WebM — a second lossy
+        // generation was the pixelation. Settings apply once here.
+        const webp = await convertToAnimatedWebp({
+          inputPath: rec.path, outPath: webpCachePath(jobId),
+          start, end, speed, fps, fit, padColor, crop, cropPos, border,
+        })
+        job.webpBytes = webp.sizeBytes
+        job.webpFps = webp.fps
+        job.progress = 0.45
+        job.stage = 'encoding'
+        publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.webpBytes, error: job.error })
+        const webm = await convertToSticker(
+          { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
+          signal,
+          p => {
+            job.progress = Math.min(0.99, 0.45 + p * 0.54)
+            job.stage = 'encoding'
+            publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.webpBytes, error: job.error })
+          }
+        )
+        return webm
+      }
 
   job.stage = 'queued'
   encodeQueue.run(task).then(async ({ sizeBytes }) => {
@@ -275,12 +295,16 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     job.status = 'done'
     job.progress = 1
     job.sizeBytes = sizeBytes
+    if (rec.kind === 'image') {
+      job.webpBytes = sizeBytes
+      job.webpFps = 4
+    }
     // Images don't need probing (they're already the final 512 WebP); videos do.
     job.outMeta = rec.kind === 'image'
       ? { width: 512, height: 512, fps: 2, duration: 0.5, bitrate: 0, codec: 'webp', pixFmt: 'yuva420p', hasAudio: false, sizeBytes }
       : await probeVideo(outputPath).catch(() => null)
     saveJob(job)   // only finished jobs are persisted — a running encode can't survive a restart
-    publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
+    publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.webpBytes ?? job.sizeBytes, error: job.error })
   }).catch((err: unknown) => {
     if (err instanceof Error && err.name === 'AbortError') {
       job.status = 'cancelled'
@@ -349,7 +373,15 @@ app.get('/api/download/tray/:jobId', (req, res) => {
 app.get('/api/output/preview/:jobId', (req, res) => {
   const job = ownedJob(req, req.params.jobId)
   if (!job || !fs.existsSync(job.outputPath)) { res.status(404).json({ error: 'Not found' }); return }
-  streamFile(req, res, job.outputPath, 'video/webm')
+  streamFile(req, res, job.outputPath, job.kind === 'image' ? 'image/webp' : 'video/webm')
+})
+
+app.get('/api/output/webp/:jobId', (req, res) => {
+  const job = ownedJob(req, req.params.jobId)
+  if (!job) { res.status(404).json({ error: 'Not found' }); return }
+  const file = job.kind === 'image' ? job.outputPath : webpCachePath(job.id)
+  if (!fs.existsSync(file)) { res.status(404).json({ error: 'Not found' }); return }
+  streamFile(req, res, file, 'image/webp')
 })
 
 app.post('/api/batch', async (req, res) => {
@@ -364,8 +396,10 @@ app.post('/api/batch', async (req, res) => {
     if (rec.kind === 'image') {
       settings = { start: 0, end: IMAGE_DUR, speed: 1, fps: IMAGE_FPS, fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false }
     } else {
-      const end = Math.min(6, rec.meta.duration)
-      const fps = Math.min(30, Math.max(10, Math.round(rec.meta.fps)))
+      const fps = capFps(rec.meta.fps)
+      const keep = motionBudget(rec.meta.duration, rec.meta.fps).maxSeconds
+      const joke = rec.meta.duration > 4 ? 4 : rec.meta.duration
+      const end = Math.min(rec.meta.duration, keep, joke)
       const detected = await detectCrop(rec.path, rec.meta).catch(() => null)
       const crop = detected && (detected.w < rec.meta.width - 8 || detected.h < rec.meta.height - 8)
         ? sanitizeCrop(detected, rec.meta)
@@ -409,8 +443,6 @@ async function assemblePack(
   // A done job's WebM is immutable, so its built WebP is deterministic — cache it
   // by jobId (outside packDir, which is wiped each build) so rebuilds only re-encode
   // stickers that are actually new. ponytail: no pruning; orphaned entries are tiny.
-  const CACHE = path.join(DATA, 'webp-cache')
-  fs.mkdirSync(CACHE, { recursive: true })
 
   const total = jobList.length
   const stickers: Array<{ image_file: string; emojis: string[] }> = []
@@ -423,16 +455,14 @@ async function assemblePack(
       fs.copyFileSync(job.outputPath, outPath)
       console.log(`pack ${pack.code}: ${name} ← image ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
     } else {
-      const cached = path.join(CACHE, `${job.id}.webp`)
+      const cached = webpCachePath(job.id)
       if (fs.existsSync(cached)) {
         fs.copyFileSync(cached, outPath)
         console.log(`pack ${pack.code}: ${name} ← cache ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
       } else {
         // The WebM is already the finished 512² frame: crop, scale, trim, speed,
         // border and audio are all baked in. Re-applying job.settings here would
-        // double-process them (original-source crop=720x712 on a 512² input =
-        // ffmpeg "size too big" crash). Only fps carries over, to step down under
-        // WhatsApp's 500KB WebP budget. ponytail: neutralized settings on purpose.
+        // double-process them. fps is the source cap; img2webp quality-first, 24fps floor.
         onProgress?.({ progress: i / total, stage: `Encoding sticker ${i + 1}/${total}` })
         const result = await convertToAnimatedWebp({
           inputPath: job.outputPath, outPath,
@@ -440,7 +470,7 @@ async function assemblePack(
           fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false
         })
         fs.copyFileSync(outPath, cached)
-        console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
+        console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames}f @ ${result.fps}fps`)
       }
     }
     stickers.push({ image_file: name, emojis: normaliseEmojis(job.emojis) })
@@ -514,7 +544,7 @@ function discardSticker(jobId: string): void {
   if (!job) return
   fs.rmSync(job.outputPath, { force: true })
   if (job.trayPath) fs.rmSync(job.trayPath, { force: true })
-  fs.rmSync(path.join(DATA, 'webp-cache', `${jobId}.webp`), { force: true })
+  fs.rmSync(webpCachePath(jobId), { force: true })
   jobs.delete(jobId)
   dbRemoveJob(jobId)
 }

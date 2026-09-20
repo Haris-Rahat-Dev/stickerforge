@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { outputPreviewUrl } from '../api.js'
+import StickerPreview from './StickerPreview.jsx'
 import { matchesQuery } from '../flow.js'
 import type { StickerView } from '../types.js'
 
@@ -28,15 +28,7 @@ export default function StickerPicker({
           {available.map(s => (
             <div key={s.jobId} className="card" onClick={() => onPick(s.jobId)}>
               <div className="thumb square">
-                <video
-                  className="thumb-cover"
-                  src={outputPreviewUrl(s.jobId)}
-                  muted
-                  loop
-                  autoPlay
-                  playsInline
-                  preload="metadata"
-                />
+                <StickerPreview jobId={s.jobId} className="thumb-cover" />
                 <span className="sticker-emoji">{s.emojis.join('')}</span>
               </div>
               <div className="card-body"><div className="card-name" title={s.name}>{s.name}</div></div>

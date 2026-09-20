@@ -157,7 +157,7 @@ body::after {
   box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.85);
 }
 .thumb { position: relative; aspect-ratio: 1; background: #000; }
-.thumb video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.thumb video, .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .thumb .chip { position: absolute; left: 10px; top: 10px; z-index: 2; }
 .card-body { padding: 12px 14px 14px; }
 .card-name {
@@ -235,6 +235,7 @@ body::after {
   background: var(--panel); border: 1px solid var(--line-hot); border-radius: 18px;
   box-shadow: 10px 10px 0 rgba(0, 0, 0, 0.55);
 }
+.editor-modal { width: min(560px, 100%); }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 16px; padding: 18px 22px 14px;
@@ -245,6 +246,7 @@ body::after {
 }
 
 .editor-body { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0; }
+.editor-solo { grid-template-columns: 1fr; }
 .preview-col { padding: 0 22px 22px; }
 .controls-col {
   padding: 4px 22px 22px; border-left: 1px solid var(--line);
@@ -290,6 +292,16 @@ body::after {
 .crop-hint { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .linkbtn { background: none; border: none; color: var(--green); cursor: pointer; text-decoration: underline; font: inherit; padding: 0; }
 .crop-toggle { align-self: flex-start; }
+
+.stage-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.stage-tools .seg { flex: 1 1 12rem; }
+.budget {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+  font-family: var(--font-mono); font-size: 12px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.budget-over { border-color: var(--amber); color: var(--amber); }
 
 .advanced { margin-top: 4px; }
 .adv-toggle { align-self: flex-start; color: var(--muted); }
@@ -340,7 +352,7 @@ select {
 .spec-hint::before { content: '→ '; color: var(--green); }
 
 .convert-btn {
-  margin-top: auto; padding: 14px;
+  margin-top: 16px; width: 100%; padding: 14px;
   font-family: var(--font-display); font-weight: 400;
   font-size: 16px; letter-spacing: 0.09em; text-transform: uppercase;
 }

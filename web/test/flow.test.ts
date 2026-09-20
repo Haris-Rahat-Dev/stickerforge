@@ -5,10 +5,11 @@ import {
   initialState,
   activePack,
   stagedCount,
+  shelfFiles,
   matchesQuery,
   type FlowState,
 } from '../src/flow.ts'
-import type { StickerView } from '../src/types.ts'
+import type { FileRecord, StickerView } from '../src/types.ts'
 
 const pack = (code: string, ready = 0) => ({
   code,
@@ -89,6 +90,19 @@ test('staging files appends them to staged', () => {
     { type: 'staged', files: [{ id: 'f2' }] as never }
   )
   assert.deepEqual(s.staged.map(f => f.id), ['f1', 'f2'])
+})
+
+test('setStaged replaces the shelf (reload hydrate)', () => {
+  const s = reducer(
+    base({ staged: [{ id: 'old' }] as never }),
+    { type: 'setStaged', files: [{ id: 'a' }, { id: 'b' }] as never }
+  )
+  assert.deepEqual(s.staged.map(f => f.id), ['a', 'b'])
+})
+
+test('shelfFiles hides sources already in the pack', () => {
+  const files = [{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }] as never as FileRecord[]
+  assert.deepEqual(shelfFiles(files, ['f2']).map(f => f.id), ['f1', 'f3'])
 })
 
 test('buildProgress updates stage while building', () => {

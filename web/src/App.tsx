@@ -16,7 +16,7 @@ import {
 } from './api.js'
 import type { FileRecord, StickerView } from './types.js'
 import type { PackSummary } from './api.js'
-import { reducer, initialState, activePack } from './flow.js'
+import { reducer, initialState, activePack, shelfFiles } from './flow.js'
 import Editor from './components/Editor.jsx'
 import PacksHome from './components/PacksHome.jsx'
 import PackCanvas from './components/PackCanvas.jsx'
@@ -46,8 +46,19 @@ export default function App() {
     return stickers
   }
 
+  const hydrateShelf = async (code: string): Promise<void> => {
+    const [files, packs] = await Promise.all([listFiles().catch(() => [] as FileRecord[]), refreshPacks()])
+    const pack = packs.find(p => p.code === code)
+    dispatch({ type: 'setStaged', files: shelfFiles(files, pack?.stickers.map(s => s.fileId) ?? []) })
+  }
+
+  const openPack = (code: string): void => {
+    dispatch({ type: 'openPack', code })
+    void hydrateShelf(code)
+  }
+
   useEffect(() => {
-    refreshPacks()
+    void refreshPacks()
   }, [])
 
   useEffect(() => {
@@ -183,7 +194,7 @@ export default function App() {
     if (!name) return
     const p = await createPack(name)
     await refreshPacks()
-    dispatch({ type: 'openPack', code: p.code })
+    openPack(p.code)
   }
 
   const renamePackByCode = async (code: string): Promise<void> => {
@@ -273,7 +284,7 @@ export default function App() {
       {state.route === 'packs' && (
         <PacksHome
           packs={state.packs}
-          onOpen={code => dispatch({ type: 'openPack', code })}
+          onOpen={openPack}
           onNew={newPack}
           onRename={renamePackByCode}
           onDelete={deletePackByCode}

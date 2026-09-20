@@ -185,6 +185,10 @@ export function outputPreviewUrl(jobId: string): string {
   return `${BASE}/api/output/preview/${jobId}${tokenQuery()}`
 }
 
+export function webpPreviewUrl(jobId: string): string {
+  return `${BASE}/api/output/webp/${jobId}${tokenQuery()}`
+}
+
 export function downloadWebm(jobId: string, name: string): void {
   void freshTokenQuery().then(q => triggerDownload(`${BASE}/api/download/webm/${jobId}${q}`, `${name}.webm`))
 }
@@ -268,7 +272,7 @@ async function pollJobUntilDone(jobId: string, on: (e: JobEvent) => void): Promi
       status: j.status,
       progress: j.progress,
       stage: j.stage,
-      sizeBytes: j.sizeBytes,
+      sizeBytes: j.webpBytes ?? j.sizeBytes,
       error: j.error,
     }
     on(e)
