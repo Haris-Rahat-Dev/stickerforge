@@ -75,7 +75,7 @@ Dev: two processes (Vite HMR + API). Production/`npm start`: Express serves `web
 
 Flow: **packs home → pack canvas → build → install drawer**. The home screen lists your packs. Opening one shows the canvas: a **staging shelf** of uploaded-but-uncommitted sources on top, collapsed to nothing when empty, above the **sticker sheet** that is the pack itself (drag to reorder, outlined empty slots below three). Editing a staged source in the editor and committing it moves it down into the sheet. At ≥3, Build assembles the WebP pack, **deletes the sources**, and opens the install drawer over the canvas.
 
-App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`, and `stickers`. There is no router dependency and no localStorage — identity is a Firebase Auth uid (verified by `firebase-admin`).
+App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`, and `stickers`. There is no router dependency and no localStorage — identity is a Firebase Auth uid when configured, otherwise an anonymous `sf_uid` cookie.
 
 `PUT /api/packs/:code/stickers` sets the pack’s ordered `jobIds`. `POST /api/packs/:code/build` re-encodes those to WebP, writes `data/packs/<code>/` + manifest, then deletes the sources. `GET /api/pack/:code` (Android) serves only a cached pack — 404 if never built; it must never rebuild (Android’s fetch times out at 30s). Files + done jobs are persisted (SQLite), so they survive a restart.
 
@@ -168,4 +168,4 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 - Web deploy to the VM is still manual (`npm run build` → rsync `web/dist` → restart `stickerforge`); no CI/push-to-deploy yet.
 - Hosted backups: `backup.sh` on the VM (SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7); bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal; `.backup.env` is gitignored and holds the Object Storage namespace on the VM; nightly cron runs on the VM (see `docs/backups.md`).
 - OCI MCP “connected” only means the server process started; Object Storage/IAM calls still need a valid `OCI_CONFIG_PROFILE` with working API signing.
-- Auth is hard-gated: server won’t start without `FIREBASE_SERVICE_ACCOUNT`, and the UI is Sign-in-only — without a usable Firebase project the app is unusable for normal dogfood (`FIREBASE_E2E_BYPASS` is test-only).
+- Auth: `firebase-admin` when `FIREBASE_SERVICE_ACCOUNT` is set; otherwise anonymous `sf_uid` cookies and no sign-in UI so dogfood/deploy works without a Firebase project.
