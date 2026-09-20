@@ -296,6 +296,7 @@ export default function App() {
           onRemove={onRemove}
           onBuild={doBuild}
           onShowInstall={() => dispatch({ type: 'openInstall' })}
+          installOpen={state.installOpen}
         />
       )}
 
