@@ -26,7 +26,9 @@ npm run test:e2e     # assertions; needs SAMPLE_A/B in ~/Downloads (see scripts/
 
 ## Accounts
 
-Firebase Auth on the **Spark (free)** plan. Browser holds the session (`firebase` web SDK); every `/api` request carries `Authorization: Bearer <id token>` (media/SSE use `?token=`). Server verifies with **`firebase-admin`** + a service-account JSON (`FIREBASE_SERVICE_ACCOUNT`). See `.env.example`.
+Firebase Auth on the **Spark (free)** plan when configured. Browser holds the session (`firebase` web SDK); every `/api` request carries `Authorization: Bearer <id token>` (media/SSE use `?token=`). Server verifies with **`firebase-admin`** + a service-account JSON (`FIREBASE_SERVICE_ACCOUNT`). See `.env.example`.
+
+**If `FIREBASE_SERVICE_ACCOUNT` is unset**, the server falls back to anonymous `sf_uid` cookies and the web build skips the sign-in screen — so dogfood/deploy still works while a Firebase project is unavailable. Flip to Firebase later by setting the env vars and rebuilding the web app.
 
 `GET /api/pack/:code` and `/api/pack/:code/file/:name` stay **unauthenticated** — Android fetches by unguessable pack code. `publicPath()` in `server/src/auth.ts` is that allowlist; do not widen it.
 
@@ -143,7 +145,8 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 
 ## Learned User Preferences
 
-- Keep Oracle infrastructure Always Free / zero paid cost (VM, Object Storage backups, IAM); prefer Always Free shapes and skip Firebase/managed DB until needed.
+- Keep Oracle infrastructure Always Free / zero paid cost (VM, Object Storage backups, IAM); prefer Always Free shapes. Firebase Auth on Spark is fine; still skip paid Firebase/managed DB.
+- Prefer `firebase-admin` + service-account JSON for ID token verify over jose/JWKS-only — user explicitly chose Admin when offered the lighter path.
 - Prefer Cursor Automations over local LaunchAgents/nohup for recurring OCI capacity retries.
 - For simple automations, prefer the cheapest standard model (Composer 2.5), not Fast variants.
 - When Always Free Ampere capacity appears, launch and hold the VM — do not only notify.
@@ -165,3 +168,4 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 - Web deploy to the VM is still manual (`npm run build` → rsync `web/dist` → restart `stickerforge`); no CI/push-to-deploy yet.
 - Hosted backups: `backup.sh` on the VM (SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7); bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal; `.backup.env` is gitignored and holds the Object Storage namespace on the VM; nightly cron runs on the VM (see `docs/backups.md`).
 - OCI MCP “connected” only means the server process started; Object Storage/IAM calls still need a valid `OCI_CONFIG_PROFILE` with working API signing.
+- Auth is hard-gated: server won’t start without `FIREBASE_SERVICE_ACCOUNT`, and the UI is Sign-in-only — without a usable Firebase project the app is unusable for normal dogfood (`FIREBASE_E2E_BYPASS` is test-only).

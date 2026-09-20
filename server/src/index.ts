@@ -13,7 +13,7 @@ import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveF
   countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
 import { stickerView, normaliseEmojis, dedupeMembership } from './sticker.js'
 import { publish, subscribe, type JobEvent } from './jobfeed.js'
-import { initAuth, publicPath } from './auth.js'
+import { createAuthMiddleware } from './auth.js'
 import type { Pack } from './types.js'
 import type { ConvertSettings, CropRect, FileRecord, FitMode, Job } from './types.js'
 
@@ -35,30 +35,14 @@ process.on('uncaughtException', err => console.error('uncaughtException:', err))
 const app = express()
 app.use(express.json())
 
-// Firebase accounts via firebase-admin verifyIdToken. Browser sends Bearer (or
-// ?token= for <img>/<video>/EventSource). Phone never sends a token — pack GETs
-// stay public via publicPath(). owner stays an opaque string.
+// Auth: firebase-admin when FIREBASE_SERVICE_ACCOUNT is set; otherwise anonymous
+// sf_uid cookie so dogfood works without Firebase. Phone pack GETs stay public.
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express { interface Request { userId: string } }
 }
 
-const verifyToken = initAuth()
-
-app.use('/api', async (req, res, next) => {
-  if (publicPath(req.baseUrl + req.path)) return next()
-  const header = req.headers.authorization ?? ''
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : ''
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
-  const token = bearer || queryToken
-  if (!token) return res.status(401).json({ error: 'sign in required' })
-  try {
-    req.userId = await verifyToken(token)
-    next()
-  } catch {
-    res.status(401).json({ error: 'sign in required' })
-  }
-})
+app.use('/api', createAuthMiddleware())
 
 const upload = multer({
   storage: multer.diskStorage({

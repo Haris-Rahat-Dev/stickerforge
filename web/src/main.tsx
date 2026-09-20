@@ -2,13 +2,18 @@ import React, { useEffect, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import SignIn from './components/SignIn.jsx'
-import { onAuth, type AuthUser } from './auth.js'
+import { authRequired, onAuth, type AuthUser } from './auth.js'
 import './styles.css'
 
 function Root() {
-  // undefined = Firebase has not reported yet; null = signed out.
-  const [user, setUser] = useState<AuthUser | null | undefined>(undefined)
-  useEffect(() => onAuth(setUser), [])
+  // Cookie mode: no Firebase config at build time — open the app immediately.
+  const [user, setUser] = useState<AuthUser | null | undefined>(
+    authRequired ? undefined : { uid: 'cookie', email: null, displayName: null }
+  )
+  useEffect(() => {
+    if (!authRequired) return
+    return onAuth(setUser)
+  }, [])
   if (user === undefined) return <main className="empty"><div className="empty-box">Loading…</div></main>
   return user ? <App /> : <SignIn />
 }

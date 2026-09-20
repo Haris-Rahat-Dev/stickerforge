@@ -5,10 +5,10 @@
   "type": "module",
   "description": "WhatsApp video sticker maker — trim, crop, compress to spec-compliant WebM/VP9",
   "scripts": {
-    "dev": "concurrently -k \"tsx watch --env-file=.env server/src/index.ts\" \"vite\"",
+    "dev": "concurrently -k \"tsx watch server/src/index.ts\" \"vite\"",
     "build": "tsc -p server/tsconfig.json && vite build",
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
-    "start": "node --env-file=.env server/dist/index.js",
+    "start": "node server/dist/index.js",
     "test": "node --test server/test/ web/test/",
     "test:e2e": "bash scripts/e2e.sh"
   },

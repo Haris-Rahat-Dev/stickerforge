@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createVerifier, publicPath } from '../src/auth.ts'
+import { createVerifier, publicPath, resolveAuthMode } from '../src/auth.ts'
 
 test('accepts a verified token and returns its uid', async () => {
   const verify = createVerifier(async () => ({ uid: 'uid-abc' }))
@@ -32,4 +32,22 @@ test('every other api route is protected', () => {
 
 test('a path merely containing /api/pack/ is not public', () => {
   assert.equal(publicPath('/api/packs/ABC/stickers'), false)
+})
+
+test('resolveAuthMode: e2e bypass wins', () => {
+  const prev = process.env.FIREBASE_E2E_BYPASS
+  process.env.FIREBASE_E2E_BYPASS = '1'
+  assert.equal(resolveAuthMode(), 'e2e')
+  if (prev === undefined) delete process.env.FIREBASE_E2E_BYPASS
+  else process.env.FIREBASE_E2E_BYPASS = prev
+})
+
+test('resolveAuthMode: cookie when service account unset', () => {
+  const prevB = process.env.FIREBASE_E2E_BYPASS
+  const prevS = process.env.FIREBASE_SERVICE_ACCOUNT
+  delete process.env.FIREBASE_E2E_BYPASS
+  delete process.env.FIREBASE_SERVICE_ACCOUNT
+  assert.equal(resolveAuthMode(), 'cookie')
+  if (prevB !== undefined) process.env.FIREBASE_E2E_BYPASS = prevB
+  if (prevS !== undefined) process.env.FIREBASE_SERVICE_ACCOUNT = prevS
 })
