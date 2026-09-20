@@ -14,11 +14,15 @@ fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 assert_eq() { # desc actual expected
   if [ "$2" = "$3" ]; then ok "$1"; else fail "$1 (got: $2, want: $3)"; fi
 }
+assert_ne() { # desc actual notexpected
+  if [ "$2" != "$3" ]; then ok "$1"; else fail "$1 (got: $2, must not be: $3)"; fi
+}
 assert_lt() { # desc actual limit
   if [ "$2" -lt "$3" ] 2>/dev/null; then ok "$1"; else fail "$1 (got: $2, limit: $3)"; fi
 }
 
-api() { curl -s -b "$DATA_DIR/cookies.txt" -c "$DATA_DIR/cookies.txt" "$@"; }
+TOKEN="e2e:e2e-user"
+api() { curl -s -H "Authorization: Bearer $TOKEN" "$@"; }
 
 check_spec() { # job_id label
   local jid="$1" label="$2"
@@ -44,11 +48,22 @@ check_spec() { # job_id label
 
 echo "── boot ──"
 cd "$(dirname "$0")/.."
-DATA_DIR="$DATA_DIR" PORT=$PORT node server/dist/index.js >"$DATA_DIR/server.log" 2>&1 &
+export FIREBASE_E2E_BYPASS=1
+DATA_DIR="$DATA_DIR" PORT=$PORT FIREBASE_E2E_BYPASS=1 node server/dist/index.js >"$DATA_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-for i in $(seq 1 30); do curl -s -o /dev/null "$BASE/api/files" && break; sleep 0.5; done
-curl -s -o /dev/null "$BASE/api/files" || { echo "server failed to boot"; cat "$DATA_DIR/server.log"; exit 1; }
+for i in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/files")" = "401" ] && break; sleep 0.5; done
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/files")" = "401" ] || { echo "server failed to boot"; cat "$DATA_DIR/server.log"; exit 1; }
 ok "server up on :$PORT (data: $DATA_DIR)"
+
+echo "── auth ──"
+assert_eq "auth: unauthenticated /api/files is 401" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/files")" "401"
+assert_eq "auth: bad token is 401" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer garbage' "$BASE/api/files")" "401"
+assert_eq "auth: valid e2e token is 200" \
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/files")" "200"
+assert_ne "auth: pack GET bypasses auth for the phone" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/pack/zzzznotreal")" "401"
 
 echo "── upload + probe ──"
 UP=$(api -F "file=@$SAMPLE_A" "$BASE/api/upload")

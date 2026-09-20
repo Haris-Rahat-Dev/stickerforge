@@ -4,7 +4,7 @@ Local WhatsApp video-sticker maker. Any video in → spec-perfect animated stick
 
 ## What this is
 
-A Node API + React editor, plus a thin Android app that can push a pack into WhatsApp. Not a hosted UGC platform. No accounts, no feed, no iOS. Dogfood the local loop first; WhatsApp whitelist is the long pole.
+A Node API + React editor, plus a thin Android app that can push a pack into WhatsApp. Not a hosted UGC platform. No feed, no iOS. Firebase Auth for accounts; WhatsApp whitelist is the long pole.
 
 ## WhatsApp spec (non-negotiable)
 
@@ -20,8 +20,17 @@ npm install
 npm run dev          # API :3210 + Vite :5173 (proxy /api → 3210)
 npm run build && npm start   # one process, UI+API on :3210
 npm run typecheck
-npm run test:e2e     # 44 assertions; needs SAMPLE_A/B in ~/Downloads (see scripts/e2e.sh)
+npm test             # node:test unit tests (auth, model, flow, …)
+npm run test:e2e     # assertions; needs SAMPLE_A/B in ~/Downloads (see scripts/e2e.sh)
 ```
+
+## Accounts
+
+Firebase Auth on the **Spark (free)** plan. Browser holds the session (`firebase` web SDK); every `/api` request carries `Authorization: Bearer <id token>` (media/SSE use `?token=`). Server verifies with **`firebase-admin`** + a service-account JSON (`FIREBASE_SERVICE_ACCOUNT`). See `.env.example`.
+
+`GET /api/pack/:code` and `/api/pack/:code/file/:name` stay **unauthenticated** — Android fetches by unguessable pack code. `publicPath()` in `server/src/auth.ts` is that allowlist; do not widen it.
+
+Cloud Storage / Cloud Run are not used. Videos, encodes, and SQLite stay on the VM.
 
 Docker (ffmpeg in image; **no cwebp/webpmux** — pack export will fail):
 
@@ -54,6 +63,7 @@ server/src/
   webp.ts            ffmpeg frames → cwebp → webpmux animated WebP
   jobfeed.ts         in-process job event bus (SSE fan-out)
   sticker.ts         derived editability, StickerView, emoji normalization
+  auth.ts            firebase-admin ID token verify + public-path allowlist
   types.ts           shared models
 android/             Java, zero deps — StickerContentProvider + one-screen importer
 data/                uploads, outputs, trays, packs, stickerforge.db (gitignored)
@@ -63,7 +73,7 @@ Dev: two processes (Vite HMR + API). Production/`npm start`: Express serves `web
 
 Flow: **packs home → pack canvas → build → install drawer**. The home screen lists your packs. Opening one shows the canvas: a **staging shelf** of uploaded-but-uncommitted sources on top, collapsed to nothing when empty, above the **sticker sheet** that is the pack itself (drag to reorder, outlined empty slots below three). Editing a staged source in the editor and committing it moves it down into the sheet. At ≥3, Build assembles the WebP pack, **deletes the sources**, and opens the install drawer over the canvas.
 
-App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`, and `stickers`. There is no router dependency and no localStorage — identity is an anonymous `sf_uid` cookie until real accounts land.
+App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`, and `stickers`. There is no router dependency and no localStorage — identity is a Firebase Auth uid (verified by `firebase-admin`).
 
 `PUT /api/packs/:code/stickers` sets the pack’s ordered `jobIds`. `POST /api/packs/:code/build` re-encodes those to WebP, writes `data/packs/<code>/` + manifest, then deletes the sources. `GET /api/pack/:code` (Android) serves only a cached pack — 404 if never built; it must never rebuild (Android’s fetch times out at 30s). Files + done jobs are persisted (SQLite), so they survive a restart.
 
@@ -87,7 +97,7 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 - Keep conversion on the server. Phones are slow at two-pass VP9.
 - Android is native Java from WhatsApp’s sample contract — not RN/Capacitor. Provider authority must start with the package name: `com.stickerforge.app.stickercontentprovider`.
 - iOS: no public provider API. Web download + Sticker.ly is the interim.
-- No accounts/packs-as-product/feed/remix until a pack has landed in WhatsApp from **our** app.
+- No packs-as-product/feed/remix until a pack has landed in WhatsApp from **our** app.
 - UI identity: die-cut print shop — Anton headlines, IBM Plex Mono labels, moss/cream/forge-green, hard stamp shadows, dashed die-cut, registration marks. Don’t generic-dark-app it.
 
 ## Model: Source / Sticker / Pack

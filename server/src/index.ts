@@ -13,6 +13,7 @@ import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveF
   countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
 import { stickerView, normaliseEmojis, dedupeMembership } from './sticker.js'
 import { publish, subscribe, type JobEvent } from './jobfeed.js'
+import { initAuth, publicPath } from './auth.js'
 import type { Pack } from './types.js'
 import type { ConvertSettings, CropRect, FileRecord, FitMode, Job } from './types.js'
 
@@ -34,37 +35,29 @@ process.on('uncaughtException', err => console.error('uncaughtException:', err))
 const app = express()
 app.use(express.json())
 
-// Anonymous per-browser identity: a random httpOnly cookie, no login. The value is
-// an unguessable UUID, so it scopes each user's files/jobs/packs. (Not signed — the
-// local threat model is nil; a hosted deployment should use signed sessions.) The
-// phone never sends this cookie: it reads packs by their unguessable code instead.
+// Firebase accounts via firebase-admin verifyIdToken. Browser sends Bearer (or
+// ?token= for <img>/<video>/EventSource). Phone never sends a token — pack GETs
+// stay public via publicPath(). owner stays an opaque string.
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express { interface Request { userId: string } }
 }
-app.use((req, res, next) => {
-  const authHeader = req.headers.authorization || ''
+
+const verifyToken = initAuth()
+
+app.use('/api', async (req, res, next) => {
+  if (publicPath(req.baseUrl + req.path)) return next()
+  const header = req.headers.authorization ?? ''
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : ''
   const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
-  if (authHeader.startsWith('Bearer ')) {
-    req.userId = authHeader.slice(7)
+  const token = bearer || queryToken
+  if (!token) return res.status(401).json({ error: 'sign in required' })
+  try {
+    req.userId = await verifyToken(token)
     next()
-    return
+  } catch {
+    res.status(401).json({ error: 'sign in required' })
   }
-  if (queryToken && /^\/api\/job\/[\w-]+\/stream$/.test(req.path)) {
-    req.userId = queryToken
-    next()
-    return
-  }
-  const cookies = Object.fromEntries(
-    (req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(p => p.length === 2)
-  )
-  let uid = cookies['sf_uid']
-  if (!uid || !/^[0-9a-f-]{36}$/.test(uid)) {
-    uid = crypto.randomUUID()
-    res.cookie('sf_uid', uid, { httpOnly: true, sameSite: 'lax', maxAge: 5 * 365 * 24 * 3600 * 1000 })
-  }
-  req.userId = uid
-  next()
 })
 
 const upload = multer({

@@ -115,6 +115,17 @@ body::after {
   text-transform: uppercase; line-height: 1; margin-bottom: 10px;
 }
 .empty p { font-family: var(--font-mono); color: var(--muted); font-size: 12.5px; margin-bottom: 30px; }
+.signin-box { cursor: default; max-width: 420px; }
+.signin-box:hover { transform: none; border-color: var(--line-hot); }
+.signin-form {
+  display: flex; flex-direction: column; gap: 10px;
+  margin: 18px 0 12px; text-align: left;
+}
+.signin-form input {
+  font-family: var(--font-mono); font-size: 13px;
+  padding: 10px 12px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+}
 .empty-steps { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
 .empty-steps span {
   font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em;

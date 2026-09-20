@@ -22,6 +22,7 @@ import PackCanvas from './components/PackCanvas.jsx'
 import InstallDrawer from './components/InstallDrawer.jsx'
 import StickerLibrary from './components/StickerLibrary.jsx'
 import StickerPicker from './components/StickerPicker.jsx'
+import { signOutUser } from './auth.js'
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState)
@@ -248,6 +249,7 @@ export default function App() {
           <span className="logo">⚡</span>
           <div><h1>Sticker<em>Forge</em></h1><p>video → die-cut stickers</p></div>
         </div>
+        <button className="btn btn-ghost btn-sm" type="button" onClick={() => void signOutUser()}>Sign out</button>
       </header>
 
       {state.route === 'packs' && (
