@@ -9,13 +9,16 @@ import { convertToSticker, computeBitrateKbps, extractTray } from './convert.js'
 import { convertToAnimatedWebp, imageToAnimatedWebp } from './webp.js'
 import { createLimiter } from './queue.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
-  createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion } from './db.js'
+  createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion,
+  countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
+import { stickerView, normaliseEmojis, dedupeMembership } from './sticker.js'
+import { publish, subscribe, type JobEvent } from './jobfeed.js'
 import type { Pack } from './types.js'
 import type { ConvertSettings, CropRect, FileRecord, FitMode, Job } from './types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..', '..')
-const DATA = path.join(ROOT, 'data')
+const DATA = process.env.DATA_DIR || path.join(ROOT, 'data')
 const UPLOADS = path.join(DATA, 'uploads')
 const OUTPUTS = path.join(DATA, 'outputs')
 const TRAYS = path.join(DATA, 'trays')
@@ -40,6 +43,18 @@ declare global {
   namespace Express { interface Request { userId: string } }
 }
 app.use((req, res, next) => {
+  const authHeader = req.headers.authorization || ''
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
+  if (authHeader.startsWith('Bearer ')) {
+    req.userId = authHeader.slice(7)
+    next()
+    return
+  }
+  if (queryToken && /^\/api\/job\/[\w-]+\/stream$/.test(req.path)) {
+    req.userId = queryToken
+    next()
+    return
+  }
   const cookies = Object.fromEntries(
     (req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(p => p.length === 2)
   )
@@ -66,7 +81,10 @@ const jobs = new Map<string, Job>()
 // Load persisted files + finished jobs so state survives a server restart.
 initDb(DATA)
 for (const rec of loadFiles()) if (fs.existsSync(rec.path)) files.set(rec.id, rec)
-for (const job of loadJobs()) if (files.has(job.fileId) && fs.existsSync(job.outputPath)) jobs.set(job.id, job)
+// A sticker outlives its source. Gate only on its own output existing — gating on
+// files.has(job.fileId) would silently drop every sticker in every built pack on the
+// first restart after a build deleted its sources.
+for (const job of loadJobs()) if (fs.existsSync(job.outputPath)) jobs.set(job.id, job)
 
 // Cap concurrent encodes so N parallel two-pass VP9 jobs don't starve each other.
 const encodeQueue = createLimiter(2)
@@ -165,7 +183,7 @@ app.delete('/api/file/:id', (req, res) => {
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   fs.rmSync(rec.path, { force: true })
   files.delete(req.params.id)
-  for (const [jid, j] of jobs) if (j.fileId === req.params.id) jobs.delete(jid)
+  // Stickers made from this source are deliberately kept — see removeFile in db.ts.
   dbRemoveFile(req.params.id)
   res.json({ ok: true })
 })
@@ -265,7 +283,11 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     : () => convertToSticker(
         { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
         signal,
-        p => { job.progress = Math.min(0.99, Math.max(job.progress, p)); job.stage = 'encoding' }
+        p => {
+          job.progress = Math.min(0.99, Math.max(job.progress, p))
+          job.stage = 'encoding'
+          publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
+        }
       )
 
   job.stage = 'queued'
@@ -281,6 +303,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
       ? { width: 512, height: 512, fps: 2, duration: 0.5, bitrate: 0, codec: 'webp', pixFmt: 'yuva420p', hasAudio: false, sizeBytes }
       : await probeVideo(outputPath).catch(() => null)
     saveJob(job)   // only finished jobs are persisted — a running encode can't survive a restart
+    publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
   }).catch((err: unknown) => {
     if (err instanceof Error && err.name === 'AbortError') {
       job.status = 'cancelled'
@@ -288,6 +311,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
       job.status = 'error'
       job.error = err instanceof Error ? err.message : 'Conversion failed'
     }
+    publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
   })
 
   return job
@@ -307,6 +331,28 @@ app.get('/api/job/:id', (req, res) => {
   if (!job) { res.status(404).json({ error: 'Job not found' }); return }
   const { outputPath, ...safe } = job
   res.json(safe)
+})
+
+app.get('/api/job/:id/stream', (req, res) => {
+  const job = ownedJob(req, req.params.id)
+  if (!job) { res.status(404).json({ error: 'Not found' }); return }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+
+  const send = (e: JobEvent): void => {
+    res.write(`data: ${JSON.stringify(e)}\n\n`)
+    if (e.status !== 'running') { off(); clearInterval(ping); res.end() }
+  }
+
+  const off = subscribe(job.id, send)
+  const ping = setInterval(() => res.write(': ping\n\n'), 25_000)
+  req.on('close', () => { off(); clearInterval(ping) })
+  send({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
 })
 
 app.get('/api/download/webm/:jobId', (req, res) => {
@@ -357,7 +403,6 @@ app.post('/api/batch', async (req, res) => {
   res.json(results)
 })
 
-const PACK_EMOJIS = ['😂', '🔥', '💀', '🤣', '👀', '🎬', '😭', '🫡']
 const CODE_RE = /^[a-z0-9-]{1,32}$/
 
 const ownedPack = (req: express.Request, code: string): Pack | null => {
@@ -373,12 +418,7 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
   const finished = pack.jobIds
     .map(id => jobs.get(id))
     .filter((j): j is Job => !!j && j.status === 'done' && !!j.outMeta)
-  // One sticker per source file: fine-tuning re-encodes and can leave the file's
-  // old jobId in the pack. Keep the latest job per fileId (Map keeps first slot,
-  // overwrites to newest) — heals packs polluted before dedupe was enforced.
-  const byFile = new Map<string, Job>()
-  for (const j of finished) byFile.set(j.fileId, j)
-  const jobList = [...byFile.values()]
+  const jobList = dedupeMembership(finished.map(j => j.id)).map(id => jobs.get(id)!)
   if (jobList.length < 3) throw new Error('Need at least 3 finished stickers in the pack')
   if (jobList.length > 30) throw new Error('WhatsApp packs cap at 30 stickers')
 
@@ -420,7 +460,7 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
         console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames} frames`)
       }
     }
-    stickers.push({ image_file: name, emojis: [PACK_EMOJIS[i % PACK_EMOJIS.length]] })
+    stickers.push({ image_file: name, emojis: normaliseEmojis(job.emojis) })
   }
 
   const tray = jobList.find(j => j.trayPath && fs.existsSync(j.trayPath))
@@ -443,14 +483,31 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
 
 // Summarise a pack for the list UI: how many members are finished, whether built.
 function packSummary(p: Pack) {
-  const ready = p.jobIds.filter(id => jobs.get(id)?.status === 'done').length
-  const built = fs.existsSync(path.join(DATA, 'packs', p.code, 'manifest.json'))
-  return { code: p.code, name: p.name, jobIds: p.jobIds, ready, built }
+  const manifestFile = path.join(DATA, 'packs', p.code, 'manifest.json')
+  const built = fs.existsSync(manifestFile)
+  const stickers = p.jobIds
+    .map(id => jobs.get(id))
+    .filter((j): j is Job => !!j && j.status === 'done')
+    .map(j => stickerView(j, files.get(j.fileId)))
+  return {
+    code: p.code, name: p.name, jobIds: p.jobIds,
+    ready: stickers.length, built,
+    builtAt: built ? fs.statSync(manifestFile).mtimeMs : null,
+    stickers,
+  }
 }
 
 // ── pack management (owner-scoped) ───────────────────────────────────────────
 app.get('/api/packs', (req, res) => {
   res.json(listPacks(req.userId).map(packSummary))
+})
+
+app.get('/api/stickers', (req, res) => {
+  const mine = [...jobs.values()]
+    .filter(j => j.owner === req.userId && j.status === 'done')
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map(j => stickerView(j, files.get(j.fileId)))
+  res.json(mine)
 })
 
 app.post('/api/packs', (req, res) => {
@@ -467,12 +524,43 @@ app.patch('/api/packs/:code', (req, res) => {
   res.json(packSummary({ ...pack, name }))
 })
 
+function discardSticker(jobId: string): void {
+  const job = jobs.get(jobId)
+  if (!job) return
+  fs.rmSync(job.outputPath, { force: true })
+  if (job.trayPath) fs.rmSync(job.trayPath, { force: true })
+  fs.rmSync(path.join(DATA, 'webp-cache', `${jobId}.webp`), { force: true })
+  jobs.delete(jobId)
+  dbRemoveJob(jobId)
+}
+
 app.delete('/api/packs/:code', (req, res) => {
   const pack = ownedPack(req, req.params.code)
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
+  const members = [...pack.jobIds]
   deletePack(pack.code)
   fs.rmSync(path.join(DATA, 'packs', pack.code), { force: true, recursive: true })
+  for (const jobId of members) if (countPacksWithJob(jobId) === 0) discardSticker(jobId)
   res.json({ ok: true })
+})
+
+app.delete('/api/sticker/:jobId', (req, res) => {
+  const job = ownedJob(req, req.params.jobId)
+  if (!job) { res.status(404).json({ error: 'Not found' }); return }
+  removeJobFromAllPacks(job.id)
+  const src = files.get(job.fileId)
+  if (src) { fs.rmSync(src.path, { force: true }); files.delete(src.id); dbRemoveFile(src.id) }
+  discardSticker(job.id)
+  res.json({ ok: true })
+})
+
+app.patch('/api/sticker/:jobId', (req, res) => {
+  const job = ownedJob(req, req.params.jobId)
+  if (!job) { res.status(404).json({ error: 'Not found' }); return }
+  job.emojis = normaliseEmojis(req.body?.emojis)
+  jobs.set(job.id, job)
+  saveJob(job)
+  res.json(stickerView(job, files.get(job.fileId)))
 })
 
 // Set the ordered membership (one job per sticker). Only the caller's finished jobs.
@@ -481,10 +569,7 @@ app.put('/api/packs/:code/stickers', (req, res) => {
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
   const valid = (Array.isArray(req.body.jobIds) ? req.body.jobIds.map(String) : [])
     .filter((id: string) => { const j = jobs.get(id); return j?.owner === req.userId && j.status === 'done' })
-  // One sticker per source file — drop a stale encode when a file was re-tuned.
-  const byFile = new Map<string, string>()
-  for (const id of valid) byFile.set(jobs.get(id)!.fileId, id)
-  const jobIds = [...byFile.values()]
+  const jobIds = dedupeMembership(valid)
   setPackStickers(pack.code, jobIds)
   res.json(packSummary({ ...pack, jobIds }))
 })
@@ -492,11 +577,26 @@ app.put('/api/packs/:code/stickers', (req, res) => {
 app.post('/api/packs/:code/build', async (req, res) => {
   const pack = ownedPack(req, req.params.code)
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
+  let manifest: Record<string, unknown>
   try {
-    res.json({ code: pack.code, ...await assemblePack(pack) })
+    manifest = await assemblePack(pack)
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Pack assembly failed' })
+    return
   }
+
+  const manifestFile = path.join(DATA, 'packs', pack.code, 'manifest.json')
+  if (fs.existsSync(manifestFile)) {
+    for (const jobId of pack.jobIds) {
+      const job = jobs.get(jobId)
+      const src = job && files.get(job.fileId)
+      if (!src) continue
+      fs.rmSync(src.path, { force: true })
+      files.delete(src.id)
+      dbRemoveFile(src.id)
+    }
+  }
+  res.json({ code: pack.code, ...manifest })
 })
 
 // ── public pack read (the phone; code is the capability, no auth) ─────────────

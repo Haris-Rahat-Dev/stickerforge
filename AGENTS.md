@@ -52,6 +52,8 @@ server/src/
   probe.ts           ffprobe + quality score + cropdetect
   convert.ts         two-pass VP9 WebM, <500KB with bitrate retry
   webp.ts            ffmpeg frames → cwebp → webpmux animated WebP
+  jobfeed.ts         in-process job event bus (SSE fan-out)
+  sticker.ts         derived editability, StickerView, emoji normalization
   types.ts           shared models
 android/             Java, zero deps — StickerContentProvider + one-screen importer
 data/                uploads, outputs, trays, packs, stickerforge.db (gitignored)
@@ -59,9 +61,11 @@ data/                uploads, outputs, trays, packs, stickerforge.db (gitignored
 
 Dev: two processes (Vite HMR + API). Production/`npm start`: Express serves `web/dist` and the API. Bind is `HOST` (default `127.0.0.1` — Docker must set `0.0.0.0` or the container is unreachable).
 
-Flow (staging tray, no batch mode): import → stage → build → install. Each uploaded video is a card; "Add to pack" encodes it with auto defaults (cover + cropdetect), or click the card to fine-tune (trim ≤6s, fit, cropPos, black-border crop, white safe-border, speed, fps) in the editor. Encodes run through a concurrency-capped queue → convert job → tray PNG. At ≥3 in-pack, Build pack assembles WebP + manifest; the Install stage shows the phone handoff. App flow state lives in one reducer (`web/src/flow.ts`).
+Flow: **packs home → pack canvas → build → install drawer**. The home screen lists your packs. Opening one shows the canvas: a **staging shelf** of uploaded-but-uncommitted sources on top, collapsed to nothing when empty, above the **sticker sheet** that is the pack itself (drag to reorder, outlined empty slots below three). Editing a staged source in the editor and committing it moves it down into the sheet. At ≥3, Build assembles the WebP pack, **deletes the sources**, and opens the install drawer over the canvas.
 
-`POST /api/pack/:code` (the editor) builds from an explicit, ordered set of `jobIds` — one per sticker — re-encodes to WebP, writes `data/packs/<code>/` + manifest. `GET /api/pack/:code` (Android uses `demo`) just serves the cached pack (Android's fetch times out at 30s, so GET must never rebuild); it only builds, from the last 3–6 done jobs, if nothing is cached yet. Files + done jobs are persisted (SQLite), so they survive a restart.
+App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`, and `stickers`. There is no router dependency and no localStorage — identity is an anonymous `sf_uid` cookie until real accounts land.
+
+`PUT /api/packs/:code/stickers` sets the pack’s ordered `jobIds`. `POST /api/packs/:code/build` re-encodes those to WebP, writes `data/packs/<code>/` + manifest, then deletes the sources. `GET /api/pack/:code` (Android) serves only a cached pack — 404 if never built; it must never rebuild (Android’s fetch times out at 30s). Files + done jobs are persisted (SQLite), so they survive a restart.
 
 ## Editor / encode rules
 
@@ -86,6 +90,32 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 - No accounts/packs-as-product/feed/remix until a pack has landed in WhatsApp from **our** app.
 - UI identity: die-cut print shop — Anton headlines, IBM Plex Mono labels, moss/cream/forge-green, hard stamp shadows, dashed die-cut, registration marks. Don’t generic-dark-app it.
 
+## Model: Source / Sticker / Pack
+
+- **Source** — the uploaded video or image. Transient. Lives in the staging shelf while iterating. Deleted when a pack containing its sticker is built successfully.
+- **Sticker** — the encoded artefact (`job` + WebM + tray PNG + webp-cache entry). Durable, owned by user, reusable in any number of packs, searchable.
+- **Pack** — an ordered `pack_stickers` membership, buildable and shippable to WhatsApp.
+
+Three rules the code depends on:
+
+1. **A sticker outlives its source.** `removeFile()` in `db.ts` deletes only the file row, and the boot filter in `index.ts` gates jobs on `fs.existsSync(job.outputPath)` alone. Gating on `files.has(job.fileId)` would drop every sticker in every built pack on the next restart.
+2. **Editability is derived, never stored.** `isEditable()` in `sticker.ts` is true iff the source file is still on disk. Building a pack is what locks its stickers.
+3. **Outputs are reference-counted.** `countPacksWithJob()` must return 0 before any sticker artefact is deleted. `DELETE /api/sticker/:jobId` is the deliberate exception — it removes the sticker from every pack first.
+
+Sources are deleted **only after** `manifest.json` exists on disk. A failed build deletes nothing and leaves the pack a draft.
+
+A sticker may belong to several packs. Membership is deduped by **jobId**, not fileId — the old fileId dedupe collapsed two legitimate trims of one source, and replace-in-place now covers the stale-job case it was protecting against.
+
+Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and are written into the manifest at build time, so changing them needs a rebuild to reach the phone. `normaliseEmojis()` in `sticker.ts` enforces the range on the way in.
+
+**All stickers** is a third route listing every sticker you own, with client-side search over name, emojis, and containing pack names. Deleting there removes the sticker from every pack; removing from a pack canvas only drops the membership and lets the reference count decide.
+
+## Live encode progress
+
+`GET /api/job/:id/stream` is a Server-Sent Events stream of `{status, progress, stage, sizeBytes, error}`. It emits current state immediately, closes itself on a terminal status, and pings every 25s to survive idle proxies. The client's `watchJob()` uses it and falls back to polling if the stream cannot be opened.
+
+**Firestore was considered and rejected for this.** Progress is written by the server, so Firestore would need a service-account credential on the VM plus `firebase-admin` or a hand-rolled JWT exchange — real operational cost for cross-device sync that encode progress does not need. Firestore remains a reasonable future choice for pack and sticker metadata, which is a different problem.
+
 ## Gotchas
 
 - `npm run dev` dies if the API process is killed; Vite alone is a blank proxy. Hard-refresh (⌘⇧R) after CSS/geometry fixes.
@@ -103,7 +133,7 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 
 ## Learned User Preferences
 
-- Prefer OCI Always Free for the first hosted deploy (long-running VM + disk/SQLite); skip Firebase/managed DB until needed.
+- Keep Oracle infrastructure Always Free / zero paid cost (VM, Object Storage backups, IAM); prefer Always Free shapes and skip Firebase/managed DB until needed.
 - Prefer Cursor Automations over local LaunchAgents/nohup for recurring OCI capacity retries.
 - For simple automations, prefer the cheapest standard model (Composer 2.5), not Fast variants.
 - When Always Free Ampere capacity appears, launch and hold the VM — do not only notify.
@@ -119,8 +149,9 @@ Good meme defaults: Crop, black-border ON, 2–4s, 1×, 30fps (or source if lowe
 - OCI home region for this project is `ap-mumbai-1`; Always Free Ampere A1 Flex is often out of capacity there.
 - When A1 is unavailable, Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg).
 - Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold, ~every 5 minutes), not a checked-in local loop.
-- Hosted access is Tailscale-only once public `:3210` is closed; laptop and phone both need Tailscale on the same account.
+- Hosted app HTTP is Tailscale-only (VM iptables allows `:3210` on `tailscale0`; public `:3210` closed); laptop and phone need Tailscale on the same account. VM tailnet hostname is `stickerforge`.
+- VM SSH uses the launch `authorized_keys` pubkey (not an OCI console `.pem`); Tailscale SSH is not enabled — `ssh ubuntu@<tailscale-ip>` still authenticates with that key over the private path.
 - Android debug builds bake `API_BASE` to the Tailscale host so pack fetch works without USB/`adb reverse`.
 - Web deploy to the VM is still manual (`npm run build` → rsync `web/dist` → restart `stickerforge`); no CI/push-to-deploy yet.
-- Hosted backups: `backup.sh` does SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7; target bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal (see `docs/backups.md`).
+- Hosted backups: `backup.sh` on the VM (SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7); bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal; `.backup.env` is gitignored and holds the Object Storage namespace on the VM; nightly cron runs on the VM (see `docs/backups.md`).
 - OCI MCP “connected” only means the server process started; Object Storage/IAM calls still need a valid `OCI_CONFIG_PROFILE` with working API signing.

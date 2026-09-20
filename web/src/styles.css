@@ -531,3 +531,65 @@ select {
   text-transform: uppercase; pointer-events: none;
 }
 
+/* ── packs home ─────────────────────────────────────────────────────────── */
+.pack-card { cursor: pointer; }
+.pack-tray { display: grid; place-items: center; background: var(--panel-2, #1c2015); }
+.pack-tray-empty { font-size: 48px; opacity: 0.35; }
+
+/* ── pack canvas & shelf ────────────────────────────────────────────────── */
+.canvas-bar { padding: 24px 28px 0; max-width: 1280px; margin: 0 auto; }
+.pack-title {
+  font-family: var(--font-display); font-size: 22px; background: none; border: 0;
+  color: inherit; cursor: pointer; padding: 0;
+}
+.shelf { padding: 16px 28px 0; max-width: 1280px; margin: 0 auto; }
+.shelf-label, .sheet-label {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+}
+.shelf-rail { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 14px; }
+.shelf-card { flex: 0 0 168px; display: flex; flex-direction: column; gap: 8px; }
+.shelf-name {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── sticker sheet ──────────────────────────────────────────────────────── */
+.sheet { padding: 20px 28px 96px; max-width: 1280px; margin: 0 auto; }
+.sticker-tile { cursor: grab; }
+.sticker-tile.dragging { opacity: 0.45; }
+.sticker-emoji { position: absolute; bottom: 8px; left: 8px; font-size: 20px; }
+.status-chip.locked { background: rgba(0, 0, 0, 0.6); }
+.slot-empty { border-style: dashed; opacity: 0.5; box-shadow: none; }
+.slot-hint {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); display: grid; place-items: center; height: 100%;
+}
+
+/* ── drawer & search & emoji picker ─────────────────────────────────────── */
+.drawer-scrim {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; justify-content: flex-end; z-index: 50;
+}
+.drawer {
+  width: min(560px, 100%); height: 100%; overflow-y: auto; padding: 28px;
+  background: var(--bg); border-left: 2px solid var(--line, #2b3122);
+  position: relative;
+}
+.drawer-close { position: absolute; top: 18px; right: 18px; opacity: 1; }
+.search {
+  flex: 1; max-width: 420px; padding: 8px 12px;
+  font-family: var(--font-mono); font-size: 12.5px;
+  background: transparent; color: inherit;
+  border: 2px solid var(--line, #2b3122); border-radius: 0;
+}
+.search:focus { outline: none; border-color: var(--green); }
+.emoji-picker { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.emoji-opt {
+  font-size: 18px; line-height: 1; padding: 4px 6px; cursor: pointer;
+  background: transparent; border: 1px solid var(--line, #2b3122);
+  color: var(--ink);
+}
+.emoji-opt:hover { background: rgba(255, 255, 255, 0.08); }
+
+

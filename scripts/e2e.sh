@@ -5,7 +5,7 @@ PORT=${E2E_PORT:-3399}
 BASE="http://127.0.0.1:$PORT"
 SAMPLE_A="$HOME/Downloads/____avy_2_-_WvBgrI.mp4"
 SAMPLE_B="$HOME/Downloads/Joe_Shitpost____-_1CfQWn.mp4"
-DATA_DIR="$(mktemp -d /tmp/opencode/sf-e2e-XXXX)"
+DATA_DIR="$(mktemp -d /tmp/sf-e2e-XXXXXX)"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); echo "  ✓ $1"; }
@@ -18,10 +18,12 @@ assert_lt() { # desc actual limit
   if [ "$2" -lt "$3" ] 2>/dev/null; then ok "$1"; else fail "$1 (got: $2, limit: $3)"; fi
 }
 
+api() { curl -s -b "$DATA_DIR/cookies.txt" -c "$DATA_DIR/cookies.txt" "$@"; }
+
 check_spec() { # job_id label
   local jid="$1" label="$2"
   local json size codec w h fps dur audio
-  json=$(curl -s "$BASE/api/job/$jid")
+  json=$(api "$BASE/api/job/$jid")
   status=$(echo "$json" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
   assert_eq "$label: status" "$status" "done"
   size=$(echo "$json"  | python3 -c "import sys,json;print(json.load(sys.stdin).get('sizeBytes',999999999))")
@@ -49,7 +51,7 @@ curl -s -o /dev/null "$BASE/api/files" || { echo "server failed to boot"; cat "$
 ok "server up on :$PORT (data: $DATA_DIR)"
 
 echo "── upload + probe ──"
-UP=$(curl -s -F "file=@$SAMPLE_A" "$BASE/api/upload")
+UP=$(api -F "file=@$SAMPLE_A" "$BASE/api/upload")
 FID_A=$(echo "$UP" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 LEVEL=$(echo "$UP" | python3 -c "import sys,json;print(json.load(sys.stdin)['quality']['level'])")
 W=$(echo "$UP" | python3 -c "import sys,json;print(json.load(sys.stdin)['meta']['width'])")
@@ -58,66 +60,130 @@ assert_eq "probe: width" "$W" "720"
 assert_eq "probe: fps" "$FPS" "16.67"
 [ -n "$LEVEL" ] && ok "probe: quality assessed ($LEVEL)" || fail "probe: quality"
 
-UP2=$(curl -s -F "file=@$SAMPLE_B" "$BASE/api/upload")
+UP2=$(api -F "file=@$SAMPLE_B" "$BASE/api/upload")
 FID_B=$(echo "$UP2" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 assert_eq "probe 4K: quality good" "$(echo "$UP2" | python3 -c "import sys,json;print(json.load(sys.stdin)['quality']['level'])")" "good"
 
 echo "── filmstrip + cropdetect ──"
-code=$(curl -s -o "$DATA_DIR/strip.jpg" -w "%{http_code}" "$BASE/api/filmstrip/$FID_A")
+code=$(api -o "$DATA_DIR/strip.jpg" -w "%{http_code}" "$BASE/api/filmstrip/$FID_A")
 assert_eq "filmstrip: 200" "$code" "200"
-CD=$(curl -s "$BASE/api/cropdetect/$FID_A")
+CD=$(api "$BASE/api/cropdetect/$FID_A")
 assert_eq "cropdetect: valid json" "$(echo "$CD" | python3 -c "import sys,json;d=json.load(sys.stdin);print('ok' if d and d['w']>0 else 'bad')")" "ok"
 
 echo "── convert: border + cropPos + custom fps ──"
-J1=$(curl -s -X POST "$BASE/api/convert" -H 'Content-Type: application/json' \
+J1=$(api -X POST "$BASE/api/convert" -H 'Content-Type: application/json' \
   -d "{\"fileId\":\"$FID_A\",\"start\":0,\"end\":2.7,\"speed\":1,\"fps\":17,\"fit\":\"cover\",\"cropPos\":0.15,\"border\":true}" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['jobId'])")
 for i in $(seq 1 60); do
-  S=$(curl -s "$BASE/api/job/$J1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
+  S=$(api "$BASE/api/job/$J1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
   [ "$S" = "done" -o "$S" = "error" ] && break; sleep 1
 done
 check_spec "$J1" "bordered 17fps"
 
 echo "── convert: 4K source, contain + pad + speed 2x ──"
-J2=$(curl -s -X POST "$BASE/api/convert" -H 'Content-Type: application/json' \
+J2=$(api -X POST "$BASE/api/convert" -H 'Content-Type: application/json' \
   -d "{\"fileId\":\"$FID_B\",\"start\":0,\"end\":5.6,\"speed\":2,\"fps\":30,\"fit\":\"contain\",\"padColor\":\"#25d366\"}" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['jobId'])")
 for i in $(seq 1 90); do
-  S=$(curl -s "$BASE/api/job/$J2" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
+  S=$(api "$BASE/api/job/$J2" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
   [ "$S" = "done" -o "$S" = "error" ] && break; sleep 1
 done
 check_spec "$J2" "4K contain"
 
 echo "── downloads ──"
-code=$(curl -s -o "$DATA_DIR/dl.webm" -w "%{http_code}" "$BASE/api/download/webm/$J1")
+code=$(api -o "$DATA_DIR/dl.webm" -w "%{http_code}" "$BASE/api/download/webm/$J1")
 assert_eq "webm download: 200" "$code" "200"
 dlsize=$(stat -f%z "$DATA_DIR/dl.webm" 2>/dev/null || stat -c%s "$DATA_DIR/dl.webm")
 assert_lt "webm download: size matches" $((dlsize - 999999)) 1
-code=$(curl -s -o "$DATA_DIR/tray.png" -w "%{http_code}" "$BASE/api/download/tray/$J1")
+code=$(api -o "$DATA_DIR/tray.png" -w "%{http_code}" "$BASE/api/download/tray/$J1")
 assert_eq "tray download: 200" "$code" "200"
 file_tray=$(file -b "$DATA_DIR/tray.png" | cut -d, -f1)
 assert_eq "tray: is PNG" "$file_tray" "PNG image data"
-code=$(curl -s -o /dev/null -w "%{http_code}" -H "Range: bytes=0-1023" "$BASE/api/output/preview/$J1")
+code=$(api -o /dev/null -w "%{http_code}" -H "Range: bytes=0-1023" "$BASE/api/output/preview/$J1")
 assert_eq "preview: range request 206" "$code" "206"
 
 echo "── batch ──"
-BATCH=$(curl -s -X POST "$BASE/api/batch" -H 'Content-Type: application/json' -d "{\"fileIds\":[\"$FID_A\",\"$FID_B\"]}")
+BATCH=$(api -X POST "$BASE/api/batch" -H 'Content-Type: application/json' -d "{\"fileIds\":[\"$FID_A\",\"$FID_B\"]}")
 JB1=$(echo "$BATCH" | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['jobId'])")
 JB2=$(echo "$BATCH" | python3 -c "import sys,json;print(json.load(sys.stdin)[1]['jobId'])")
 for i in $(seq 1 120); do
-  S1=$(curl -s "$BASE/api/job/$JB1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
-  S2=$(curl -s "$BASE/api/job/$JB2" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
+  S1=$(api "$BASE/api/job/$JB1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
+  S2=$(api "$BASE/api/job/$JB2" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
   { [ "$S1" = "done" -o "$S1" = "error" ] && [ "$S2" = "done" -o "$S2" = "error" ]; } && break; sleep 1
 done
 check_spec "$JB1" "batch[1]"
 check_spec "$JB2" "batch[2]"
 
+echo "── job stream ──"
+STREAM=$(api --max-time 5 "$BASE/api/job/$J1/stream" | head -1)
+assert_eq "stream: emits current state and closes" \
+  "$(echo "$STREAM" | python3 -c "import sys,json;print(json.loads(sys.stdin.read().replace('data: ',''))['status'])")" "done"
+
+echo "── pack build + source deletion ──"
+PACK=$(api -X POST "$BASE/api/packs" -H 'Content-Type: application/json' -d '{"name":"E2E Pack"}')
+PACK_CODE=$(echo "$PACK" | python3 -c "import sys,json;print(json.load(sys.stdin)['code'])")
+[ -n "$PACK_CODE" ] && ok "pack: created ($PACK_CODE)" || fail "pack: created"
+
+PUT=$(api -X PUT "$BASE/api/packs/$PACK_CODE/stickers" -H 'Content-Type: application/json' \
+  -d "{\"jobIds\":[\"$J1\",\"$JB1\",\"$JB2\"]}")
+READY=$(echo "$PUT" | python3 -c "import sys,json;print(json.load(sys.stdin)['ready'])")
+assert_eq "pack: 3 ready" "$READY" "3"
+
+EDITABLE_BEFORE=$(api "$BASE/api/stickers" \
+  | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s['editable']))")
+assert_lt "pack: stickers editable before build" 0 "$EDITABLE_BEFORE"
+
+BUILT=$(api -X POST "$BASE/api/packs/$PACK_CODE/build")
+assert_eq "pack: built" \
+  "$(echo "$BUILT" | python3 -c "import sys,json;print(len(json.load(sys.stdin)['stickers']))")" "3"
+
+assert_eq "pack: sources deleted after build" \
+  "$(api "$BASE/api/video/$FID_B" -o /dev/null -w '%{http_code}')" "404"
+assert_eq "pack: stickers locked after build" \
+  "$(api "$BASE/api/stickers" | python3 -c "import sys,json;print(any(s['editable'] for s in json.load(sys.stdin)))")" "False"
+assert_eq "pack: webm still downloadable after source deletion" \
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/download/webm/$J1")" "200"
+
+REBUILT=$(api -X POST "$BASE/api/packs/$PACK_CODE/build")
+assert_eq "pack: rebuild succeeds with sources gone" \
+  "$(echo "$REBUILT" | python3 -c "import sys,json;print(len(json.load(sys.stdin)['stickers']))")" "3"
+
+assert_eq "pack: public GET serves the built pack" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/pack/$PACK_CODE")" "200"
+
+echo "── sticker reuse + emojis ──"
+PACK3=$(api -X POST "$BASE/api/packs" -H 'Content-Type: application/json' -d '{"name":"Reuse"}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['code'])")
+REUSE=$(api -X PUT "$BASE/api/packs/$PACK3/stickers" -H 'Content-Type: application/json' \
+  -d "{\"jobIds\":[\"$JB1\",\"$JB2\"]}")
+assert_eq "reuse: a sticker can sit in two packs" \
+  "$(echo "$REUSE" | python3 -c "import sys,json;print(json.load(sys.stdin)['ready'])")" "2"
+api -X PATCH "$BASE/api/sticker/$JB1" -H 'Content-Type: application/json' \
+  -d '{"emojis":["🔥","💀"]}' > /dev/null
+assert_eq "emoji: stored on the sticker" \
+  "$(api "$BASE/api/stickers" | python3 -c "import sys,json;print(next(s['emojis'] for s in json.load(sys.stdin) if s['jobId']=='$JB1'))")" \
+  "['🔥', '💀']"
+
+echo "── refcount + sticker delete ──"
+PACK2=$(api -X POST "$BASE/api/packs" -H 'Content-Type: application/json' -d '{"name":"Shared"}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['code'])")
+api -X PUT "$BASE/api/packs/$PACK2/stickers" -H 'Content-Type: application/json' \
+  -d "{\"jobIds\":[\"$J1\"]}" > /dev/null
+api -X DELETE "$BASE/api/packs/$PACK2" > /dev/null
+assert_eq "refcount: shared sticker survives deleting one of its packs" \
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/download/webm/$J1")" "200"
+api -X DELETE "$BASE/api/sticker/$J1" > /dev/null
+assert_eq "sticker delete: artefacts gone" \
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/download/webm/$J1")" "404"
+
 echo "── delete + 404s ──"
-code=$(curl -s -X DELETE "$BASE/api/file/$FID_A" -o /dev/null -w "%{http_code}")
+UP3=$(api -F "file=@$SAMPLE_A" "$BASE/api/upload")
+FID_C=$(echo "$UP3" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+code=$(api -X DELETE "$BASE/api/file/$FID_C" -o /dev/null -w "%{http_code}")
 assert_eq "delete: 200" "$code" "200"
-code=$(curl -s "$BASE/api/video/$FID_A" -o /dev/null -w "%{http_code}")
+code=$(api "$BASE/api/video/$FID_C" -o /dev/null -w "%{http_code}")
 assert_eq "deleted file: 404" "$code" "404"
-code=$(curl -s "$BASE/api/job/nonexistent" -o /dev/null -w "%{http_code}")
+code=$(api "$BASE/api/job/nonexistent" -o /dev/null -w "%{http_code}")
 assert_eq "unknown job: 404" "$code" "404"
 
 echo "── SPA serving ──"

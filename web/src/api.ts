@@ -1,4 +1,4 @@
-import type { BatchJobInfo, ConvertRequest, CropRect, FileRecord, Job } from './types'
+import type { BatchJobInfo, ConvertRequest, CropRect, FileRecord, Job, StickerView } from './types.js'
 
 const BASE = ''
 
@@ -89,6 +89,8 @@ export interface PackSummary {
   jobIds: string[]
   ready: number
   built: boolean
+  builtAt?: number | null
+  stickers: StickerView[]
 }
 
 async function packJson<T>(url: string, method: string, body?: unknown): Promise<T> {
@@ -136,3 +138,79 @@ function triggerDownload(url: string, filename: string): void {
   a.click()
   a.remove()
 }
+
+export interface JobEvent {
+  jobId: string
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  progress: number
+  stage: string
+  sizeBytes?: number
+  error?: string
+}
+
+export async function deleteSticker(jobId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/sticker/${jobId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Could not delete sticker')
+}
+
+export async function setStickerEmojis(jobId: string, emojis: string[]): Promise<StickerView> {
+  const res = await fetch(`${BASE}/api/sticker/${jobId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ emojis }),
+  })
+  if (!res.ok) throw new Error('Could not set emojis')
+  return res.json()
+}
+
+export const listStickers = (): Promise<StickerView[]> =>
+  fetch(`${BASE}/api/stickers`).then(r => r.json())
+
+export async function watchJob(jobId: string, on: (e: JobEvent) => void): Promise<JobEvent> {
+  return new Promise<JobEvent>((resolve, reject) => {
+    let settled = false
+    const es = new EventSource(`${BASE}/api/job/${jobId}/stream`)
+
+    es.onmessage = ev => {
+      try {
+        const e = JSON.parse(ev.data) as JobEvent
+        on(e)
+        if (e.status === 'running') return
+        settled = true
+        es.close()
+        e.status === 'done' ? resolve(e) : reject(new Error(e.error || 'Encode failed'))
+      } catch (err) {
+        if (settled) return
+        settled = true
+        es.close()
+        reject(err)
+      }
+    }
+
+    es.onerror = () => {
+      if (settled) return
+      settled = true
+      es.close()
+      pollJobUntilDone(jobId, on).then(resolve, reject)
+    }
+  })
+}
+
+async function pollJobUntilDone(jobId: string, on: (e: JobEvent) => void): Promise<JobEvent> {
+  for (;;) {
+    const j = await getJob(jobId)
+    const e: JobEvent = {
+      jobId,
+      status: j.status,
+      progress: j.progress,
+      stage: j.stage,
+      sizeBytes: j.sizeBytes,
+      error: j.error,
+    }
+    on(e)
+    if (e.status === 'done') return e
+    if (e.status !== 'running') throw new Error(e.error || 'Encode failed')
+    await new Promise(r => setTimeout(r, 600))
+  }
+}
+

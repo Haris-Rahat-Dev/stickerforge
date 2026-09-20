@@ -59,7 +59,7 @@ export interface ConvertRequest extends ConvertSettings {
   fileId: string
 }
 
-export type JobStatus = 'running' | 'done' | 'error'
+export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'
 
 export interface Job {
   id: string
@@ -85,12 +85,13 @@ export interface UploadProgress {
   progress: number
 }
 
-// Per-card state in the staging tray. Absent = "needs review" (uploaded,
-// not yet added). 'encoding' → 'inpack' | 'error'.
-export interface PackEntry {
-  status: 'encoding' | 'inpack' | 'error'
-  jobId?: string
-  progress?: number
+export interface StickerView {
+  jobId: string
+  fileId: string
+  kind: MediaKind
+  name: string
   sizeBytes?: number
-  error?: string
+  editable: boolean
+  emojis: string[]
 }
+

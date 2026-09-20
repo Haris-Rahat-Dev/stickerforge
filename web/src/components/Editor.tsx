@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, getJob, outputPreviewUrl, downloadWebm, downloadTray, detectCrop } from '../api.js'
+import { videoUrl, filmstripUrl, convert, outputPreviewUrl, downloadWebm, downloadTray, detectCrop, watchJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
 import Timeline from './Timeline.jsx'
 
 const MIN_SPAN = 0.3
 const MAX_OUT_DUR = 6
 
-export default function Editor({ file, onClose, onAddedToPack }: { file: FileRecord; onClose: () => void; onAddedToPack?: (jobId: string, sizeBytes?: number) => void }) {
+export default function Editor({
+  file,
+  replaceAt,
+  onClose,
+  onAddedToPack,
+}: {
+  file: FileRecord
+  replaceAt?: number
+  onClose: () => void
+  onAddedToPack?: (jobId: string, sizeBytes?: number, replaceAt?: number) => void
+}) {
   const meta = file.meta
   const duration = Math.max(meta.duration, 0.5)
 
@@ -45,18 +55,13 @@ export default function Editor({ file, onClose, onAddedToPack }: { file: FileRec
 
   useEffect(() => {
     if (!jobId) return
-    let stop = false
-    const timer = setInterval(async () => {
-      try {
-        const j = await getJob(jobId)
-        if (stop) return
-        setJob(j)
-        if (j.status === 'done') { onAddedToPack?.(jobId, j.sizeBytes); clearInterval(timer) }
-        else if (j.status === 'error') clearInterval(timer)
-      } catch { clearInterval(timer) }
-    }, 600)
-    return () => { stop = true; clearInterval(timer) }
-  }, [jobId])
+    void watchJob(jobId, j => setJob(prev => prev ? { ...prev, progress: j.progress, stage: j.stage } : prev))
+      .then(j => {
+        setJob(prev => prev ? { ...prev, status: 'done', sizeBytes: j.sizeBytes } : prev)
+        onAddedToPack?.(jobId, j.sizeBytes, replaceAt)
+      })
+      .catch(() => {})
+  }, [jobId, replaceAt])
 
   useEffect(() => {
     const v = videoRef.current

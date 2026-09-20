@@ -9,6 +9,7 @@
     "build": "tsc -p server/tsconfig.json && vite build",
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
     "start": "node server/dist/index.js",
+    "test": "node --test server/test/ web/test/",
     "test:e2e": "bash scripts/e2e.sh"
   },
   "dependencies": {

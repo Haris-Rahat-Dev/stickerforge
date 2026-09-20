@@ -45,9 +45,15 @@ export function saveFile(rec: FileRecord): void {
 export function saveJob(job: Job): void {
   db!.prepare('INSERT OR REPLACE INTO jobs (id, file_id, json) VALUES (?, ?, ?)').run(job.id, job.fileId, JSON.stringify(job))
 }
+// A source and the stickers made from it now have independent lifetimes: building a
+// pack deletes the source while the sticker lives on. Deleting the file row must
+// therefore NOT cascade into jobs.
 export function removeFile(id: string): void {
   db!.prepare('DELETE FROM files WHERE id = ?').run(id)
-  db!.prepare('DELETE FROM jobs WHERE file_id = ?').run(id)
+}
+
+export function removeJob(id: string): void {
+  db!.prepare('DELETE FROM jobs WHERE id = ?').run(id)
 }
 
 // ── packs ────────────────────────────────────────────────────────────────────
@@ -96,4 +102,16 @@ export function setPackStickers(code: string, jobIds: string[]): void {
 export function deletePack(code: string): void {
   db!.prepare('DELETE FROM pack_stickers WHERE code = ?').run(code)
   db!.prepare('DELETE FROM packs WHERE code = ?').run(code)
+}
+
+// Cross-pack reuse means a sticker's output files belong to no single pack. Nothing
+// may delete them until no pack references the job any more.
+export function countPacksWithJob(jobId: string): number {
+  const row = db!.prepare('SELECT COUNT(DISTINCT code) AS n FROM pack_stickers WHERE job_id = ?')
+    .get(jobId) as { n: number }
+  return row.n
+}
+
+export function removeJobFromAllPacks(jobId: string): void {
+  db!.prepare('DELETE FROM pack_stickers WHERE job_id = ?').run(jobId)
 }

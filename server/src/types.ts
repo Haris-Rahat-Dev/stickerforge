@@ -84,4 +84,6 @@ export interface Job {
   sizeBytes?: number
   outMeta?: VideoMeta | null
   error?: string
+  /** 1–3 emojis for the WhatsApp manifest. Absent means "not chosen yet". */
+  emojis?: string[]
 }
