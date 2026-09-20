@@ -37,6 +37,7 @@ export type Action =
   | { type: 'buildOk'; manifest: PackManifest & { code: string } }
   | { type: 'buildFail'; error: string }
   | { type: 'closeInstall' }
+  | { type: 'openInstall' }
 
 const drop = <T,>(obj: Record<string, T>, key: string): Record<string, T> => {
   const { [key]: _drop, ...rest } = obj
@@ -86,6 +87,9 @@ export function reducer(s: FlowState, a: Action): FlowState {
       return { ...s, building: false, buildError: a.error, installOpen: false }
     case 'closeInstall':
       return { ...s, installOpen: false }
+    case 'openInstall':
+      // Only meaningful once a manifest exists for this canvas session.
+      return s.built ? { ...s, installOpen: true } : s
     default: {
       const _exhaustive: never = a
       void _exhaustive

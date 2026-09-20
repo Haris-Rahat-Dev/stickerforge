@@ -22,6 +22,7 @@ export default function PackCanvas(props: {
   onReplace: (s: StickerView) => void
   onRemove: (s: StickerView) => void
   onBuild: () => void
+  onShowInstall?: () => void
 }) {
   const { pack, building, buildError } = props
   const encodingNow = Object.keys(props.encoding).length > 0
@@ -69,6 +70,9 @@ export default function PackCanvas(props: {
           {reason && <span className="muted"> · {reason}</span>}
         </div>
         {buildError && <div className="pack-err">✗ {buildError}</div>}
+        {pack.built && state.built && !state.installOpen && (
+          <button className="btn btn-ghost btn-sm" type="button" style={{ marginLeft: 8 }} onClick={() => props.onShowInstall?.()}>Show install</button>
+        )}
         <button className="btn btn-primary" disabled={!!reason || building} onClick={props.onBuild}>
           {building ? 'Building pack…' : pack.built ? '↻ Rebuild pack' : '⚡ Build pack'}
         </button>

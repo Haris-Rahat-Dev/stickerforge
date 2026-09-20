@@ -503,7 +503,7 @@ select {
 .qr-code-text { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .qr-code-text code { color: var(--green); background: var(--panel-2); padding: 2px 7px; border-radius: 4px; border: 1px solid var(--line); }
 .handoff-col { flex: 1; min-width: 260px; }
-.install-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.install-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; padding-right: 44px; }
 .install-head h2 { font-family: var(--font-display); font-size: 24px; letter-spacing: 0.03em; }
 .install-head em { color: var(--green); font-style: normal; }
 .install-actions { display: flex; gap: 10px; }
