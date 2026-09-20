@@ -91,6 +91,15 @@ test('staging files appends them to staged', () => {
   assert.deepEqual(s.staged.map(f => f.id), ['f1', 'f2'])
 })
 
+test('buildProgress updates stage while building', () => {
+  const s0 = reducer(base({}), { type: 'buildStart' })
+  assert.equal(s0.building, true)
+  assert.equal(s0.buildProgress?.stage, 'Starting…')
+  const s1 = reducer(s0, { type: 'buildProgress', progress: 0.5, stage: 'Encoding sticker 2/4' })
+  assert.equal(s1.buildProgress?.progress, 0.5)
+  assert.equal(s1.buildProgress?.stage, 'Encoding sticker 2/4')
+})
+
 test('a failed build keeps the pack open and records the error', () => {
   const s = reducer(base({ route: 'pack', building: true }), { type: 'buildFail', error: 'boom' })
   assert.equal(s.route, 'pack')

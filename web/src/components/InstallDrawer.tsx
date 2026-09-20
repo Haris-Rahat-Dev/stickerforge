@@ -5,11 +5,13 @@ import type { PackManifest } from '../api.js'
 export default function InstallDrawer({
   manifest,
   building,
+  buildProgress,
   onClose,
   onRebuild,
 }: {
   manifest: PackManifest & { code: string }
   building?: boolean
+  buildProgress?: { progress: number; stage: string } | null
   onClose: () => void
   onRebuild?: () => void
 }) {
@@ -37,9 +39,13 @@ export default function InstallDrawer({
               <button className="btn" onClick={onRebuild} disabled={building}>
                 {building ? 'Rebuilding…' : '↻ Rebuild'}
               </button>
+              {building && buildProgress && (
+                <span className="muted" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                  {buildProgress.stage} · {Math.round(buildProgress.progress * 100)}%
+                </span>
+              )}
             </div>
-          )}
-        </div>
+          )}        </div>
         <div className="install-cols">
           <div className="qr-col">
             {qr ? <img className="qr" src={qr} alt="Scan to open on phone" /> : <div className="qr placeholder" />}

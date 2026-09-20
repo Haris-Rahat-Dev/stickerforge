@@ -391,7 +391,10 @@ const ownedPack = (req: express.Request, code: string): Pack | null => {
 // cache to disk; the phone's GET only ever serves the cache (its fetch times out at
 // 30s). Reuses the pack's stable identifier and bumps its version so re-adding
 // updates the same WhatsApp pack instead of duplicating it.
-async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
+async function assemblePack(
+  pack: Pack,
+  onProgress?: (e: { progress: number; stage: string }) => void,
+): Promise<Record<string, unknown>> {
   const finished = pack.jobIds
     .map(id => jobs.get(id))
     .filter((j): j is Job => !!j && j.status === 'done' && !!j.outMeta)
@@ -409,8 +412,10 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
   const CACHE = path.join(DATA, 'webp-cache')
   fs.mkdirSync(CACHE, { recursive: true })
 
+  const total = jobList.length
   const stickers: Array<{ image_file: string; emojis: string[] }> = []
   for (const [i, job] of jobList.entries()) {
+    onProgress?.({ progress: i / total, stage: `Sticker ${i + 1}/${total}` })
     const name = `s${i + 1}.webp`
     const outPath = path.join(packDir, name)
     if (job.kind === 'image') {
@@ -428,6 +433,7 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
         // double-process them (original-source crop=720x712 on a 512² input =
         // ffmpeg "size too big" crash). Only fps carries over, to step down under
         // WhatsApp's 500KB WebP budget. ponytail: neutralized settings on purpose.
+        onProgress?.({ progress: i / total, stage: `Encoding sticker ${i + 1}/${total}` })
         const result = await convertToAnimatedWebp({
           inputPath: job.outputPath, outPath,
           start: 0, end: job.outMeta!.duration, speed: 1, fps: job.settings.fps,
@@ -440,6 +446,7 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
     stickers.push({ image_file: name, emojis: normaliseEmojis(job.emojis) })
   }
 
+  onProgress?.({ progress: 0.95, stage: 'Writing tray & manifest' })
   const tray = jobList.find(j => j.trayPath && fs.existsSync(j.trayPath))
   if (!tray) throw new Error('Tray icon missing — no sticker in the pack has one')
   fs.copyFileSync(tray.trayPath!, path.join(packDir, 'tray.png'))
@@ -455,6 +462,7 @@ async function assemblePack(pack: Pack): Promise<Record<string, unknown>> {
     stickers
   }
   fs.writeFileSync(path.join(packDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+  onProgress?.({ progress: 1, stage: 'Done' })
   return manifest
 }
 
@@ -554,11 +562,22 @@ app.put('/api/packs/:code/stickers', (req, res) => {
 app.post('/api/packs/:code/build', async (req, res) => {
   const pack = ownedPack(req, req.params.code)
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
+
+  // NDJSON stream so the UI can show per-sticker progress. Final line is
+  // { done: true, ...manifest } or { error: "..." }.
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.flushHeaders?.()
+  const emit = (obj: Record<string, unknown>): void => {
+    res.write(JSON.stringify(obj) + '\n')
+  }
+
   let manifest: Record<string, unknown>
   try {
-    manifest = await assemblePack(pack)
+    manifest = await assemblePack(pack, e => emit(e))
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Pack assembly failed' })
+    emit({ error: err instanceof Error ? err.message : 'Pack assembly failed' })
+    res.end()
     return
   }
 
@@ -573,7 +592,8 @@ app.post('/api/packs/:code/build', async (req, res) => {
       dbRemoveFile(src.id)
     }
   }
-  res.json({ code: pack.code, ...manifest })
+  emit({ done: true, code: pack.code, ...manifest })
+  res.end()
 })
 
 // ── public pack read (the phone; code is the capability, no auth) ─────────────

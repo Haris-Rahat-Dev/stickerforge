@@ -119,7 +119,52 @@ export const createPack = (name: string): Promise<PackSummary> => packJson('/api
 export const renamePack = (code: string, name: string): Promise<PackSummary> => packJson(`/api/packs/${code}`, 'PATCH', { name })
 export const deletePack = (code: string): Promise<void> => packJson(`/api/packs/${code}`, 'DELETE')
 export const setPackStickers = (code: string, jobIds: string[]): Promise<PackSummary> => packJson(`/api/packs/${code}/stickers`, 'PUT', { jobIds })
-export const buildPack = (code: string): Promise<PackManifest & { code: string }> => packJson(`/api/packs/${code}/build`, 'POST')
+export const buildPack = (
+  code: string,
+  onProgress?: (e: { progress: number; stage: string }) => void,
+): Promise<PackManifest & { code: string }> =>
+  apiFetch(`${BASE}/api/packs/${code}/build`, { method: 'POST' }).then(async res => {
+    if (!res.ok || !res.body) {
+      const json = await res.json().catch(() => ({}))
+      throw new Error((json as { error?: string }).error || 'Pack build failed')
+    }
+    const reader = res.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ''
+    let result: (PackManifest & { code: string }) | null = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const msg = JSON.parse(line) as {
+          progress?: number
+          stage?: string
+          done?: boolean
+          error?: string
+          code?: string
+          identifier?: string
+          name?: string
+          stickers?: PackManifest['stickers']
+        }
+        if (msg.error) throw new Error(msg.error)
+        if (typeof msg.progress === 'number' && msg.stage) onProgress?.({ progress: msg.progress, stage: msg.stage })
+        if (msg.done) {
+          result = {
+            code: msg.code || code,
+            identifier: msg.identifier || '',
+            name: msg.name || '',
+            stickers: msg.stickers || [],
+          }
+        }
+      }
+    }
+    if (!result) throw new Error('Pack build ended without a result')
+    return result
+  })
 
 /** Public cached pack — used to reopen the install drawer without rebuilding. */
 export async function fetchPackManifest(code: string): Promise<PackManifest & { code: string }> {

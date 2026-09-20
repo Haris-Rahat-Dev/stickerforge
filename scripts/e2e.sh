@@ -150,7 +150,17 @@ assert_lt "pack: stickers editable before build" 0 "$EDITABLE_BEFORE"
 
 BUILT=$(api -X POST "$BASE/api/packs/$PACK_CODE/build")
 assert_eq "pack: built" \
-  "$(echo "$BUILT" | python3 -c "import sys,json;print(len(json.load(sys.stdin)['stickers']))")" "3"
+  "$(echo "$BUILT" | python3 -c "
+import sys, json
+manifest = None
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    o = json.loads(line)
+    if o.get('done'): manifest = o
+    if o.get('error'): raise SystemExit('build error: ' + o['error'])
+print(len(manifest['stickers']) if manifest else 0)
+")" "3"
 
 assert_eq "pack: sources deleted after build" \
   "$(api "$BASE/api/video/$FID_B" -o /dev/null -w '%{http_code}')" "404"
@@ -161,7 +171,16 @@ assert_eq "pack: webm still downloadable after source deletion" \
 
 REBUILT=$(api -X POST "$BASE/api/packs/$PACK_CODE/build")
 assert_eq "pack: rebuild succeeds with sources gone" \
-  "$(echo "$REBUILT" | python3 -c "import sys,json;print(len(json.load(sys.stdin)['stickers']))")" "3"
+  "$(echo "$REBUILT" | python3 -c "
+import sys, json
+manifest = None
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    o = json.loads(line)
+    if o.get('done'): manifest = o
+print(len(manifest['stickers']) if manifest else 0)
+")" "3"
 
 assert_eq "pack: public GET serves the built pack" \
   "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/pack/$PACK_CODE")" "200"

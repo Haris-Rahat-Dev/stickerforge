@@ -10,6 +10,7 @@ export default function PackCanvas(props: {
   encoding: Record<string, number>
   errors: Record<string, string>
   building: boolean
+  buildProgress: { progress: number; stage: string } | null
   buildError: string | null
   onBack: () => void
   onRename: () => void
@@ -25,7 +26,7 @@ export default function PackCanvas(props: {
   onShowInstall?: () => void
   installOpen?: boolean
 }) {
-  const { pack, building, buildError } = props
+  const { pack, building, buildError, buildProgress } = props
   const encodingNow = Object.keys(props.encoding).length > 0
   const reason =
     pack.ready < 3
@@ -71,11 +72,19 @@ export default function PackCanvas(props: {
           {reason && <span className="muted"> · {reason}</span>}
         </div>
         {buildError && <div className="pack-err">✗ {buildError}</div>}
+        {building && buildProgress && (
+          <div className="pack-build-progress" title={buildProgress.stage}>
+            <div className="pack-build-bar">
+              <div className="pack-build-fill" style={{ width: `${Math.round(buildProgress.progress * 100)}%` }} />
+            </div>
+            <span className="muted">{buildProgress.stage} · {Math.round(buildProgress.progress * 100)}%</span>
+          </div>
+        )}
         {pack.built && props.onShowInstall && !props.installOpen && (
           <button className="btn btn-ghost btn-sm" type="button" style={{ marginLeft: 8 }} onClick={() => props.onShowInstall?.()}>Show install</button>
         )}
         <button className="btn btn-primary" disabled={!!reason || building} onClick={props.onBuild}>
-          {building ? 'Building pack…' : pack.built ? '↻ Rebuild pack' : '⚡ Build pack'}
+          {building ? 'Building…' : pack.built ? '↻ Rebuild pack' : '⚡ Build pack'}
         </button>
       </div>
     </>

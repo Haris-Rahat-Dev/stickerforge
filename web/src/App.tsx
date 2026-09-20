@@ -218,7 +218,7 @@ export default function App() {
       return
     dispatch({ type: 'buildStart' })
     try {
-      const manifest = await buildPack(pack.code)
+      const manifest = await buildPack(pack.code, e => dispatch({ type: 'buildProgress', ...e }))
       dispatch({ type: 'buildOk', manifest })
       await refreshPacks()
     } catch (err) {
@@ -299,6 +299,7 @@ export default function App() {
           encoding={state.encoding}
           errors={state.errors}
           building={state.building}
+          buildProgress={state.buildProgress}
           buildError={state.buildError}
           onBack={() => dispatch({ type: 'closePack' })}
           onRename={() => renamePackByCode(active.code)}
@@ -329,6 +330,7 @@ export default function App() {
         <InstallDrawer
           manifest={state.built}
           building={state.building}
+          buildProgress={state.buildProgress}
           onClose={() => dispatch({ type: 'closeInstall' })}
           onRebuild={doBuild}
         />

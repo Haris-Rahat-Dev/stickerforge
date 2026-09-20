@@ -14,6 +14,7 @@ export interface FlowState {
   encoding: Record<string, number>   // fileId → progress (0..1)
   errors: Record<string, string>     // fileId → message
   building: boolean
+  buildProgress: { progress: number; stage: string } | null
   built: (PackManifest & { code: string }) | null
   buildError: string | null
   installOpen: boolean
@@ -34,6 +35,7 @@ export type Action =
   | { type: 'encProgress'; fileId: string; progress: number }
   | { type: 'encError'; fileId: string; error: string }
   | { type: 'buildStart' }
+  | { type: 'buildProgress'; progress: number; stage: string }
   | { type: 'buildOk'; manifest: PackManifest & { code: string } }
   | { type: 'buildFail'; error: string }
   | { type: 'closeInstall' }
@@ -80,12 +82,14 @@ export function reducer(s: FlowState, a: Action): FlowState {
     case 'encError':
       return { ...s, encoding: drop(s.encoding, a.fileId), errors: { ...s.errors, [a.fileId]: a.error } }
     case 'buildStart':
-      return { ...s, building: true, buildError: null }
+      return { ...s, building: true, buildError: null, buildProgress: { progress: 0, stage: 'Starting…' } }
+    case 'buildProgress':
+      return { ...s, buildProgress: { progress: a.progress, stage: a.stage } }
     case 'buildOk':
       // The canvas stays mounted. Install is a drawer over it, not a screen replacing it.
-      return { ...s, building: false, built: a.manifest, buildError: null, installOpen: true }
+      return { ...s, building: false, buildProgress: null, built: a.manifest, buildError: null, installOpen: true }
     case 'buildFail':
-      return { ...s, building: false, buildError: a.error, installOpen: false }
+      return { ...s, building: false, buildProgress: null, buildError: a.error, installOpen: false }
     case 'closeInstall':
       return { ...s, installOpen: false }
     case 'openInstall':
@@ -110,6 +114,7 @@ export const initialState = (): FlowState => ({
   encoding: {},
   errors: {},
   building: false,
+  buildProgress: null,
   built: null,
   buildError: null,
   installOpen: false,

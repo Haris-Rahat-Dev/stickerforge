@@ -473,6 +473,17 @@ select {
 .pack-status .muted { color: var(--muted); }
 .pack-done { font-family: var(--font-mono); font-size: 12.5px; color: var(--green); }
 .pack-err { font-family: var(--font-mono); font-size: 12.5px; color: var(--red); }
+.pack-build-progress {
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 160px;
+  font-family: var(--font-mono); font-size: 11.5px;
+}
+.pack-build-bar {
+  flex: 1; max-width: 180px; height: 8px; border-radius: 99px; overflow: hidden;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.pack-build-fill {
+  height: 100%; background: var(--green); transition: width 0.2s ease;
+}
 .pack-bar .btn-primary { margin-left: auto; }
 
 /* ── flow stepper ───────────────────────────────────────── */
