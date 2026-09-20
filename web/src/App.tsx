@@ -9,6 +9,7 @@ import {
   deletePack,
   setPackStickers,
   buildPack,
+  fetchPackManifest,
   listStickers,
   deleteSticker,
   setStickerEmojis,
@@ -235,6 +236,21 @@ export default function App() {
     dispatch({ type: 'discard', fileId })
   }
 
+  const onShowInstall = async (): Promise<void> => {
+    const code = state.activeCode
+    if (!code) return
+    if (state.built?.code === code) {
+      dispatch({ type: 'openInstall' })
+      return
+    }
+    try {
+      const manifest = await fetchPackManifest(code)
+      dispatch({ type: 'showInstall', manifest })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'No built pack found')
+    }
+  }
+
   const active = activePack(state)
 
   return (
@@ -295,7 +311,7 @@ export default function App() {
           onReplace={onReplace}
           onRemove={onRemove}
           onBuild={doBuild}
-          onShowInstall={() => dispatch({ type: 'openInstall' })}
+          onShowInstall={() => void onShowInstall()}
           installOpen={state.installOpen}
         />
       )}

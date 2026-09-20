@@ -127,6 +127,13 @@ test('reopening install does nothing when no manifest exists', () => {
   assert.equal(s.built, null)
 })
 
+test('showInstall hydrates the manifest and opens the drawer', () => {
+  const manifest = { code: 'abc', identifier: 'i', name: 'n', stickers: [] }
+  const s = reducer(base({}), { type: 'showInstall', manifest })
+  assert.equal(s.installOpen, true)
+  assert.deepEqual(s.built, manifest)
+})
+
 test('activePack resolves the open pack', () => {
   assert.equal(activePack(base({ packs: [pack('a'), pack('b')], activeCode: 'b' }))?.code, 'b')
   assert.equal(activePack(base({ packs: [], activeCode: 'b' })), null)

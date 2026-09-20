@@ -121,6 +121,14 @@ export const deletePack = (code: string): Promise<void> => packJson(`/api/packs/
 export const setPackStickers = (code: string, jobIds: string[]): Promise<PackSummary> => packJson(`/api/packs/${code}/stickers`, 'PUT', { jobIds })
 export const buildPack = (code: string): Promise<PackManifest & { code: string }> => packJson(`/api/packs/${code}/build`, 'POST')
 
+/** Public cached pack — used to reopen the install drawer without rebuilding. */
+export async function fetchPackManifest(code: string): Promise<PackManifest & { code: string }> {
+  const res = await fetch(`${BASE}/api/pack/${code}`)
+  const json = await res.json()
+  if (!res.ok) throw new Error(json.error || 'Pack not found')
+  return { ...json, code }
+}
+
 export async function getJob(jobId: string): Promise<Job> {
   const res = await apiFetch(`${BASE}/api/job/${jobId}`)
   const json = await res.json()
