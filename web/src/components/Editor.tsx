@@ -173,7 +173,7 @@ export default function Editor({
                         <video
                           ref={videoRef}
                           src={videoUrl(file.id)}
-                          controls muted playsInline preload="auto"
+                          muted playsInline loop autoPlay preload="auto"
                           style={videoStyle(meta, activeCrop)}
                         />
                       )}
