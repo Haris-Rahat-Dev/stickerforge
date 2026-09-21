@@ -174,13 +174,13 @@ This is what caught the single-frame defect below, and it is cheap (two 512² ff
 - Prefer generic host/device copy in UI and docs — no Mac- or USB-specific wording.
 - For the Ampere Cursor Automation, put OCI credentials as Runtime Secrets on the selected Cloud Environment (not Build Secrets); redacted values still mean present.
 - Never search/enumerate credential files on disk (`find`/`mdfind`/broad `ls` for `*.pem`, keys, `.env`, etc.); ask for an exact path or have the user paste — EDR treats that hunt as sensitive-data enumeration.
-- Prefer the trim timeline as the primary fine-tune control; keep framing/speed/fps secondary and clearly preview-matched — non-trim fine-tune knobs have repeatedly felt confusing or ineffective.
+- Prefer maximizing kept frames/duration/fps within WhatsApp caps; contain/letterbox non-square sources rather than crop-away; when a cut is required, use the trim timeline as the primary fine-tune (framing/speed/fps secondary, preview-matched).
 
 ## Learned Workspace Facts
 
 - Hosted StickerForge needs a long-running VM with ffmpeg/cwebp/webpmux; SQLite + local disk is enough for v1.
 - OCI home region for this project is `ap-mumbai-1`; Always Free Ampere A1 Flex is often out of capacity there.
-- When A1 is unavailable, Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg).
+- When A1 is unavailable, Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg; keep encode concurrency low on this shape).
 - Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold, ~every 5 minutes), not a checked-in local loop.
 - Hosted app HTTP is Tailscale-only (VM iptables allows `:3210` on `tailscale0`; public `:3210` closed); laptop and phone need Tailscale on the same account. VM tailnet hostname is `stickerforge`.
 - VM SSH uses the launch `authorized_keys` pubkey (not an OCI console `.pem`); Tailscale SSH is not enabled — `ssh ubuntu@<tailscale-ip>` still authenticates with that key over the private path.

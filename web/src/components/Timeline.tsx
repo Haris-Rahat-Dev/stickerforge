@@ -147,7 +147,7 @@ export default function Timeline({ duration, start, end, stripUrl, maxSpan, onCh
         <span className={overLimit ? 'tl-span-bad' : ''}>
           {span.toFixed(2)}s{overLimit ? ` — over ${maxSpan.toFixed(1)}s` : ''}
         </span>
-        <span>{end.toFixed(2)}s</span>
+        <span>{duration.toFixed(2)}s</span>
       </div>
     </div>
   )
