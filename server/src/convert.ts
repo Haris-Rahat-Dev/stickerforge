@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { stat } from 'node:fs/promises'
+import { planSpan } from './budget.js'
 import type { ConvertSettings, CropRect, FitMode } from './types.js'
 
 const MAX_BYTES = 500 * 1024
@@ -79,7 +80,7 @@ export async function convertToSticker(opts: ConvertOptions, signal: AbortSignal
     '-progress', 'pipe:1',
     '-nostats',
     '-ss', String(start),
-    '-t', String(Math.min(6.5, (end - start) / speed + 0.2)),
+    '-t', String(planSpan(start, end, speed).srcSpan + 0.2),
     '-i', inputPath,
     '-vf', `${filters},setpts=PTS/${speed}`,
     '-r', String(fps),

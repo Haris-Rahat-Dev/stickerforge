@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import type { FileRecord, Job, MediaKind } from './types.js'
+import type { FileRecord, Job, MediaKind, StickerSpec } from './types.js'
 
 export interface StickerView {
   jobId: string
@@ -10,6 +10,8 @@ export interface StickerView {
   /** True while the original upload is still on disk. Re-cropping needs it. */
   editable: boolean
   emojis: string[]
+  /** Measured from the encoded WebP once it exists; absent for a sticker never encoded. */
+  spec?: StickerSpec
 }
 
 // Editability is derived, never stored. Building a pack deletes its sources, which is
@@ -41,6 +43,7 @@ export function stickerView(job: Job, source: FileRecord | undefined): StickerVi
     sizeBytes: job.webpBytes ?? job.sizeBytes,
     editable: isEditable(job, source),
     emojis: normaliseEmojis(job.emojis),
+    ...(job.spec ? { spec: job.spec } : {}),
   }
 }
 

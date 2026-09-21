@@ -8,11 +8,56 @@ const execFileAsync = promisify(execFile)
 // animated WebP go through the video path so their motion survives.
 const STILL_CODECS = new Set(['png', 'mjpeg', 'jpeg', 'bmp', 'tiff'])
 
+interface ProbeStream {
+  codec_type: string
+  codec_name?: string
+  pix_fmt?: string
+  width?: number
+  height?: number
+  r_frame_rate?: string
+  avg_frame_rate?: string
+  duration?: string
+  bit_rate?: string
+  side_data_list?: Array<{ side_data_type?: string; rotation?: number }>
+}
+
 export async function probeMedia(filePath: string): Promise<{ meta: VideoMeta; kind: MediaKind }> {
   const meta = await probeVideo(filePath)
   const kind: MediaKind = STILL_CODECS.has(meta.codec) ? 'image' : 'video'
   if (kind === 'image') return { meta: { ...meta, fps: 0, duration: 0, hasAudio: false }, kind }
   return { meta, kind }
+}
+
+/**
+ * The frame size the encoder actually sees. ffprobe's width/height are the *coded*
+ * dimensions; ffmpeg auto-applies the display matrix on decode, so for a portrait
+ * phone clip (coded 1920×1080, rotation -90) every downstream crop coordinate has to
+ * be measured against 1080×1920 or the box lands somewhere else entirely.
+ */
+export function displaySize(s: ProbeStream): { width: number; height: number } {
+  const w = s.width ?? 0
+  const h = s.height ?? 0
+  const rot = displayRotation(s)
+  const quarter = Math.round(((rot % 360) + 360) % 360 / 90) % 4
+  return quarter === 1 || quarter === 3 ? { width: h, height: w } : { width: w, height: h }
+}
+
+export function displayRotation(s: ProbeStream): number {
+  const matrix = s.side_data_list?.find(d => d.side_data_type === 'Display Matrix')
+  return typeof matrix?.rotation === 'number' ? matrix.rotation : 0
+}
+
+/** avg_frame_rate is the honest average; r_frame_rate is a base timebase guess that
+ *  can read absurd (1000/1) on VFR screen recordings and forwarded memes. */
+export function frameRate(s: ProbeStream): number {
+  for (const raw of [s.avg_frame_rate, s.r_frame_rate]) {
+    const [num, den] = (raw || '0/0').split('/').map(Number)
+    if (num > 0 && den > 0) {
+      const fps = num / den
+      if (fps > 0 && fps <= 1000) return Math.round(fps * 100) / 100
+    }
+  }
+  return 0
 }
 
 export async function probeVideo(filePath: string): Promise<VideoMeta> {
@@ -24,16 +69,7 @@ export async function probeVideo(filePath: string): Promise<VideoMeta> {
     filePath
   ])
   const data = JSON.parse(stdout) as {
-    streams?: Array<{
-      codec_type: string
-      codec_name?: string
-      pix_fmt?: string
-      width?: number
-      height?: number
-      r_frame_rate?: string
-      duration?: string
-      bit_rate?: string
-    }>
+    streams?: ProbeStream[]
     format?: { duration?: string; bit_rate?: string; size?: string }
   }
 
@@ -41,13 +77,14 @@ export async function probeVideo(filePath: string): Promise<VideoMeta> {
   const audio = data.streams?.find(s => s.codec_type === 'audio')
   if (!video || !video.width || !video.height) throw new Error('No video stream found')
 
-  const [num, den] = (video.r_frame_rate || '30/1').split('/').map(Number)
-  const fps = den ? num / den : 30
+  const { width, height } = displaySize(video)
+  const rotation = displayRotation(video)
 
   return {
-    width: video.width,
-    height: video.height,
-    fps: Math.round(fps * 100) / 100,
+    width,
+    height,
+    fps: frameRate(video),
+    rotation,
     duration: parseFloat(data.format?.duration || video.duration || '0'),
     bitrate: parseInt(data.format?.bit_rate || video.bit_rate || '0', 10),
     codec: video.codec_name || 'unknown',
@@ -78,7 +115,7 @@ export function assessQuality(meta: VideoMeta, kind: MediaKind = 'video'): Quali
     return { level, notes }
   }
 
-  if (meta.fps < 20) {
+  if (meta.fps > 0 && meta.fps < 20) {
     notes.push({ type: 'warn', msg: `Low framerate (${meta.fps}fps) — sticker will look choppy` })
     level = 'warn'
   }
@@ -106,6 +143,23 @@ export function assessQuality(meta: VideoMeta, kind: MediaKind = 'video'): Quali
   return { level, notes }
 }
 
+/**
+ * cropdetect reports per-frame. Taking the last reading meant a clip whose letterbox
+ * changes mid-run — or a single black-frame scene change — set a crop for the whole
+ * sticker. The most common rect across the sampled window is the safe answer.
+ */
+export function modalCrop(detections: string[]): CropRect | null {
+  const counts = new Map<string, number>()
+  for (const d of detections) counts.set(d, (counts.get(d) ?? 0) + 1)
+  let best: string | null = null
+  let bestN = 0
+  for (const [d, n] of counts) if (n > bestN) { best = d; bestN = n }
+  if (!best) return null
+  const [w, h, x, y] = best.split(':').map(Number)
+  if (![w, h, x, y].every(Number.isFinite) || w < 16 || h < 16) return null
+  return { w, h, x, y }
+}
+
 export function detectCrop(inputPath: string, meta: VideoMeta): Promise<CropRect | null> {
   return new Promise((resolve, reject) => {
     const p = spawn('ffmpeg', [
@@ -118,11 +172,8 @@ export function detectCrop(inputPath: string, meta: VideoMeta): Promise<CropRect
     let stderr = ''
     p.stderr.on('data', d => { stderr += d.toString() })
     p.on('close', () => {
-      const matches = [...stderr.matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)]
-      if (!matches.length) return resolve(null)
-      const [w, h, x, y] = matches[matches.length - 1].slice(1).map(Number)
-      if (w < 16 || h < 16) return resolve(null)
-      resolve({ w, h, x, y })
+      const seen = [...stderr.matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)].map(m => m.slice(1, 5).join(':'))
+      resolve(modalCrop(seen))
     })
     p.on('error', reject)
   })

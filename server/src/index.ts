@@ -6,16 +6,17 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { convertToSticker, extractTray } from './convert.js'
-import { convertToAnimatedWebp, imageToAnimatedWebp } from './webp.js'
-import { capFps, motionBudget } from './budget.js'
+import { convertToAnimatedWebp, imageToAnimatedWebp, type WebpResult } from './webp.js'
+import { capFps, maxSrcSpanForSpeed, motionBudget } from './budget.js'
 import { createLimiter } from './queue.js'
+import { reapOrphans } from './reap.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
   createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion,
   countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
 import { stickerView, normaliseEmojis, dedupeMembership } from './sticker.js'
 import { publish, subscribe, type JobEvent } from './jobfeed.js'
 import { createAuthMiddleware } from './auth.js'
-import type { Pack } from './types.js'
+import type { Pack, StickerSpec } from './types.js'
 import type { ConvertSettings, CropRect, FileRecord, FitMode, Job } from './types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -25,14 +26,36 @@ const UPLOADS = path.join(DATA, 'uploads')
 const OUTPUTS = path.join(DATA, 'outputs')
 const TRAYS = path.join(DATA, 'trays')
 const WEB_CACHE = path.join(DATA, 'webp-cache')
+const PACKS = path.join(DATA, 'packs')
 const WEB_DIST = path.join(ROOT, 'web', 'dist')
 
-for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS, WEB_CACHE]) fs.mkdirSync(dir, { recursive: true })
+for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS, WEB_CACHE, PACKS]) fs.mkdirSync(dir, { recursive: true })
 
 const webpCachePath = (jobId: string): string => path.join(WEB_CACHE, `${jobId}.webp`)
 
+// The encode reports what it measured; this is the shape the app stores and shows.
+const specOf = (r: WebpResult): StickerSpec => ({
+  width: r.width, height: r.height, frames: r.frames, fps: r.fps,
+  duration: r.duration, sizeBytes: r.sizeBytes, ssim: r.ssim,
+})
+
+// One place that decides what a progress event looks like, so the stream, the SSE
+// handshake and the terminal event can never disagree.
+const publishJob = (job: Job): void => publish({
+  jobId: job.id,
+  status: job.status,
+  progress: job.progress,
+  stage: job.stage,
+  sizeBytes: job.webpBytes ?? job.sizeBytes,
+  spec: job.spec,
+  error: job.error,
+})
+
 // Safety net: a stray rejected promise (e.g. an ffmpeg failure in an async route)
-// must never take the whole server down. Log and keep serving.
+// must never take the whole server down. Log and keep serving. Deliberate tradeoff:
+// after an uncaughtException the process may be in an unknown state, and for a
+// single-user local tool a degraded server beats a dead one — but in-flight encodes
+// are not guaranteed consistent, so a restart is the fix if anything looks wrong.
 process.on('unhandledRejection', err => console.error('unhandledRejection:', err))
 process.on('uncaughtException', err => console.error('uncaughtException:', err))
 
@@ -48,6 +71,18 @@ declare global {
 
 app.use('/api', createAuthMiddleware())
 
+// One line per API call. There is no other way to read what the hosted box did, and
+// encodes are long enough that timing them matters.
+app.use('/api', (req, res, next) => {
+  const started = Date.now()
+  res.on('finish', () => {
+    const ms = Date.now() - started
+    if (req.path.endsWith('/stream') || res.statusCode < 400 && ms < 250) return
+    console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} ${ms}ms`)
+  })
+  next()
+})
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOADS,
@@ -58,14 +93,53 @@ const upload = multer({
 
 const files = new Map<string, FileRecord>()
 const jobs = new Map<string, Job>()
+// Live encodes that can be stopped. A two-pass VP9 run holds a queue slot for ~90s,
+// so an abandoned tab has to be able to give it back.
+const jobAbort = new Map<string, AbortController>()
+
+// Express 4 does not catch a rejected async handler; without this the request simply
+// hangs open until the client gives up.
+type AsyncHandler = (req: express.Request, res: express.Response) => Promise<unknown>
+const ah = (fn: AsyncHandler): express.RequestHandler =>
+  (req, res, next) => { Promise.resolve(fn(req, res)).catch(next) }
 
 // Load persisted files + finished jobs so state survives a server restart.
 initDb(DATA)
-for (const rec of loadFiles()) if (fs.existsSync(rec.path)) files.set(rec.id, rec)
+const missingFiles: string[] = []
+for (const rec of loadFiles()) {
+  if (fs.existsSync(rec.path)) files.set(rec.id, rec)
+  else missingFiles.push(rec.path)
+}
 // A sticker outlives its source. Gate only on its own output existing — gating on
 // files.has(job.fileId) would silently drop every sticker in every built pack on the
 // first restart after a build deleted its sources.
-for (const job of loadJobs()) if (fs.existsSync(job.outputPath)) jobs.set(job.id, job)
+const missingJobs: string[] = []
+for (const job of loadJobs()) {
+  if (fs.existsSync(job.outputPath)) jobs.set(job.id, job)
+  else missingJobs.push(job.outputPath)
+}
+if (missingFiles.length || missingJobs.length) {
+  // A drop here means lost work, so it must never be silent: an unusable stored path
+  // and a deliberately-deleted source look the same from here.
+  console.warn(`boot: ${files.size} file(s) + ${jobs.size} sticker(s) loaded, ` +
+    `${missingFiles.length} upload(s) + ${missingJobs.length} sticker output(s) had no file on disk`)
+  for (const p of [...missingFiles, ...missingJobs].slice(0, 10)) console.warn(`  missing: ${p}`)
+}
+
+// Media no record can reach — a crashed build's staging dir, a filmstrip whose source
+// is gone, an upload deleted out from under its job. Runs before anything can write.
+const reaped = reapOrphans({
+  dataDir: DATA, uploads: UPLOADS, outputs: OUTPUTS, trays: TRAYS,
+  webpCache: WEB_CACHE, packs: PACKS,
+  liveFilePaths: [...files.values()].map(f => f.path),
+  liveFileIds: files.keys(),
+  liveJobPaths: [...jobs.values()].flatMap(j => [
+    j.outputPath, j.trayPath, webpCachePath(j.id),
+  ].filter((p): p is string => !!p)),
+})
+if (reaped.removed.length) {
+  console.log(`boot: reclaimed ${(reaped.bytes / 1024 / 1024).toFixed(1)}MB of unreachable media (${reaped.removed.length} file(s))`)
+}
 
 // Cap concurrent encodes so N parallel two-pass VP9 jobs don't starve each other.
 const encodeQueue = createLimiter(2)
@@ -118,10 +192,17 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
       border: !!body.border
     }
   }
+  const speed = Math.min(4, Math.max(0.25, Number(body.speed) || 1))
+  const start = Math.max(0, Number(body.start) || 0)
+  // Slow motion stretches the timeline, so the legal source span grows with speed
+  // and shrinks below 1× — otherwise a 0.5× pass would silently emit a 12s sticker.
+  const end = Math.min(
+    Number(body.end) || Math.min(duration, maxSrcSpanForSpeed(speed)),
+    duration || maxSrcSpanForSpeed(speed),
+    start + maxSrcSpanForSpeed(speed),
+  )
   return {
-    start: Math.max(0, Number(body.start) || 0),
-    end: Math.min(Number(body.end) || Math.min(6, duration), duration || 6),
-    speed: Math.min(4, Math.max(0.25, Number(body.speed) || 1)),
+    start, end, speed,
     fps: capFps(Number(body.fps) || rec.meta.fps),
     fit,
     padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
@@ -131,7 +212,7 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
   }
 }
 
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', upload.single('file'), ah(async (req, res) => {
   try {
     if (!req.file) { res.status(400).json({ error: 'No file provided' }); return }
     const { meta, kind } = await probeMedia(req.file.path)
@@ -148,12 +229,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
     files.set(id, record)
     saveFile(record)
-    res.json(record)
+    // Same shape as GET /api/files: the absolute server path is not the client's business.
+    const { path: _path, ...safeRecord } = record
+    res.json(safeRecord)
   } catch (err) {
     if (req.file?.path) fs.rmSync(req.file.path, { force: true })
     res.status(400).json({ error: err instanceof Error ? err.message : 'Probe failed' })
   }
-})
+}))
 
 app.get('/api/files', (req, res) => {
   res.json([...files.values()].filter(f => f.owner === req.userId).map(({ path: _path, ...rest }) => rest))
@@ -203,7 +286,7 @@ app.get('/api/video/:id', (req, res) => {
   streamFile(req, res, rec.path, mime)
 })
 
-app.get('/api/filmstrip/:id', async (req, res) => {
+app.get('/api/filmstrip/:id', ah(async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   const out = path.join(DATA, `${req.params.id}-strip.jpg`)
@@ -227,18 +310,18 @@ app.get('/api/filmstrip/:id', async (req, res) => {
     // a source ffmpeg can't read shouldn't take the server down — just skip the strip
     res.status(422).json({ error: 'Could not build filmstrip' })
   }
-})
+}))
 
-app.get('/api/cropdetect/:id', async (req, res) => {
+app.get('/api/cropdetect/:id', ah(async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   if (!rec.suggestedCrop) {
     rec.suggestedCrop = await detectCrop(rec.path, rec.meta).catch(() => null)
   }
   res.json(rec.suggestedCrop)
-})
+}))
 
-function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null): Job {
+function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null, controller?: AbortController): Job {
   const jobId = crypto.randomUUID()
   // Videos: WebM for Sticker.ly, then img2webp cache for WhatsApp. Images skip VP9
   // (libvpx can hang on a still) and write the motionless animated WebP directly.
@@ -256,63 +339,81 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     startedAt: Date.now()
   }
   jobs.set(jobId, job)
+  if (signal) jobAbort.set(jobId, controller ?? new AbortController())
 
   const { start, end, speed, fps, fit, padColor, crop, cropPos, border } = settings
 
   const task = rec.kind === 'image'
-    ? () => imageToAnimatedWebp({ inputPath: rec.path, outPath: outputPath, start, end, fps, fit, padColor, crop, cropPos, border })
+    ? async () => {
+        const webp = await imageToAnimatedWebp({ inputPath: rec.path, outPath: outputPath, start, end, fps, fit, padColor, crop, cropPos, border })
+        job.spec = specOf(webp)
+        return webp
+      }
     : async () => {
         job.stage = 'webp'
-        publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
+        publishJob(job)
         // WhatsApp WebP from the original, not the VP9 WebM — a second lossy
         // generation was the pixelation. Settings apply once here.
         const webp = await convertToAnimatedWebp({
           inputPath: rec.path, outPath: webpCachePath(jobId),
           start, end, speed, fps, fit, padColor, crop, cropPos, border,
+        }, (p, stage) => {
+          // The WebP pass is the long one and used to report nothing at all.
+          job.progress = p * 0.45
+          job.stage = stage
+          publishJob(job)
         })
         job.webpBytes = webp.sizeBytes
         job.webpFps = webp.fps
+        job.spec = specOf(webp)
         job.progress = 0.45
         job.stage = 'encoding'
-        publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.webpBytes, error: job.error })
+        publishJob(job)
         const webm = await convertToSticker(
           { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
           signal,
           p => {
             job.progress = Math.min(0.99, 0.45 + p * 0.54)
             job.stage = 'encoding'
-            publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.webpBytes, error: job.error })
+            publishJob(job)
           }
         )
         return webm
       }
 
   job.stage = 'queued'
-  encodeQueue.run(task).then(async ({ sizeBytes }) => {
+  encodeQueue.run(task).then(async result => {
     const trayPath = path.join(TRAYS, `${jobId}.png`)
     await extractTray(rec.path, trayPath, start, crop, cropPos)
     job.trayPath = fs.existsSync(trayPath) ? trayPath : null
     job.status = 'done'
     job.progress = 1
-    job.sizeBytes = sizeBytes
+    job.sizeBytes = result.sizeBytes
+    // Measure the artefact that ships. The WebP is what WhatsApp receives, so its
+    // read-back properties — not the requested ones — are the spec of record.
     if (rec.kind === 'image') {
-      job.webpBytes = sizeBytes
-      job.webpFps = 4
+      job.webpBytes = job.spec?.sizeBytes ?? result.sizeBytes
+      job.webpFps = job.spec?.fps ?? 0
     }
-    // Images don't need probing (they're already the final 512 WebP); videos do.
-    job.outMeta = rec.kind === 'image'
-      ? { width: 512, height: 512, fps: 2, duration: 0.5, bitrate: 0, codec: 'webp', pixFmt: 'yuva420p', hasAudio: false, sizeBytes }
+    job.outMeta = rec.kind === 'image' && job.spec
+      ? {
+        width: job.spec.width, height: job.spec.height, fps: job.spec.fps,
+        duration: job.spec.duration, bitrate: 0, codec: 'webp',
+        pixFmt: 'webp', hasAudio: false, sizeBytes: job.spec.sizeBytes,
+      }
       : await probeVideo(outputPath).catch(() => null)
+    jobAbort.delete(jobId)
     saveJob(job)   // only finished jobs are persisted — a running encode can't survive a restart
-    publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.webpBytes ?? job.sizeBytes, error: job.error })
+    publishJob(job)
   }).catch((err: unknown) => {
+    jobAbort.delete(jobId)
     if (err instanceof Error && err.name === 'AbortError') {
       job.status = 'cancelled'
     } else {
       job.status = 'error'
       job.error = err instanceof Error ? err.message : 'Conversion failed'
     }
-    publish({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
+    publishJob(job)
   })
 
   return job
@@ -353,7 +454,23 @@ app.get('/api/job/:id/stream', (req, res) => {
   const off = subscribe(job.id, send)
   const ping = setInterval(() => res.write(': ping\n\n'), 25_000)
   req.on('close', () => { off(); clearInterval(ping) })
-  send({ jobId: job.id, status: job.status, progress: job.progress, stage: job.stage, sizeBytes: job.sizeBytes, error: job.error })
+  publishJob(job)
+})
+
+// Stop a running encode and hand its queue slot back. A cancelled job keeps no
+// artefacts: the partial output is discarded rather than left to be reaped.
+app.post('/api/job/:id/cancel', (req, res) => {
+  const job = ownedJob(req, req.params.id)
+  if (!job) { res.status(404).json({ error: 'Job not found' }); return }
+  if (job.status !== 'running') { res.json({ ok: true, status: job.status }); return }
+  jobAbort.get(job.id)?.abort()
+  jobAbort.delete(job.id)
+  fs.rmSync(job.outputPath, { force: true })
+  fs.rmSync(webpCachePath(job.id), { force: true })
+  job.status = 'cancelled'
+  job.error = 'Cancelled'
+  publishJob(job)
+  res.json({ ok: true, status: job.status })
 })
 
 app.get('/api/download/webm/:jobId', (req, res) => {
@@ -428,20 +545,30 @@ const ownedPack = (req: express.Request, code: string): Pack | null => {
 async function assemblePack(
   pack: Pack,
   onProgress?: (e: { progress: number; stage: string }) => void,
-): Promise<Record<string, unknown>> {
+): Promise<{ manifest: Record<string, unknown>; included: string[] }> {
   const finished = pack.jobIds
     .map(id => jobs.get(id))
     .filter((j): j is Job => !!j && j.status === 'done' && !!j.outMeta)
   const jobList = dedupeMembership(finished.map(j => j.id)).map(id => jobs.get(id)!)
-  if (jobList.length < 3) throw new Error('Need at least 3 finished stickers in the pack')
-  if (jobList.length > 30) throw new Error('WhatsApp packs cap at 30 stickers')
+  const unusable = pack.jobIds.length - finished.length
+  if (jobList.length < 3) {
+    throw new Error(unusable > 0
+      ? `${unusable} of ${pack.jobIds.length} stickers in this pack have no finished encode — rebuild or replace ${unusable === 1 ? 'it' : 'them'}, or add more stickers`
+      : `A WhatsApp pack needs at least 3 stickers — this one has ${jobList.length}`)
+  }
+  if (jobList.length > 30) throw new Error(`WhatsApp packs cap at 30 stickers — this one has ${jobList.length}`)
 
-  const packDir = path.join(DATA, 'packs', pack.code)
-  fs.rmSync(packDir, { force: true, recursive: true })
-  fs.mkdirSync(packDir, { recursive: true })
+  const packDir = path.join(PACKS, pack.code)
+  // Build into a sibling and swap only once the manifest exists. Wiping packDir up
+  // front meant any failure — a budget error, a missing cache entry — destroyed the
+  // last good pack, so the phone's GET started 404ing for a pack that used to work.
+  const stage = packDir + '.next'
+  fs.rmSync(stage, { force: true, recursive: true })
+  fs.mkdirSync(stage, { recursive: true })
+  const out = (name: string): string => path.join(stage, name)
 
   // A done job's WebM is immutable, so its built WebP is deterministic — cache it
-  // by jobId (outside packDir, which is wiped each build) so rebuilds only re-encode
+  // by jobId (outside packDir, which is rebuilt) so rebuilds only re-encode
   // stickers that are actually new. ponytail: no pruning; orphaned entries are tiny.
 
   const total = jobList.length
@@ -449,7 +576,7 @@ async function assemblePack(
   for (const [i, job] of jobList.entries()) {
     onProgress?.({ progress: i / total, stage: `Sticker ${i + 1}/${total}` })
     const name = `s${i + 1}.webp`
-    const outPath = path.join(packDir, name)
+    const outPath = out(name)
     if (job.kind === 'image') {
       // Already a motionless animated WebP — just place it.
       fs.copyFileSync(job.outputPath, outPath)
@@ -460,17 +587,28 @@ async function assemblePack(
         fs.copyFileSync(cached, outPath)
         console.log(`pack ${pack.code}: ${name} ← cache ${(fs.statSync(outPath).size / 1024).toFixed(0)}KB`)
       } else {
-        // The WebM is already the finished 512² frame: crop, scale, trim, speed,
-        // border and audio are all baked in. Re-applying job.settings here would
-        // double-process them. fps is the source cap; img2webp quality-first, 24fps floor.
+        // Never encode the pack WebP from the WebM: that is a second lossy
+        // generation, and it was the pixelation. The cache is only a shortcut, so
+        // rebuild it from the original with job.settings applied once — exactly as
+        // the Add-time encode did.
+        const src = files.get(job.fileId)
+        if (!src || !fs.existsSync(src.path)) {
+          const label = stickerView(job, src).name
+          throw new Error(
+            `"${label}" has no cached WebP and its source was deleted after the last build, ` +
+            `so it cannot be re-encoded without quality loss. Re-add that sticker, then build again.`
+          )
+        }
         onProgress?.({ progress: i / total, stage: `Encoding sticker ${i + 1}/${total}` })
         const result = await convertToAnimatedWebp({
-          inputPath: job.outputPath, outPath,
-          start: 0, end: job.outMeta!.duration, speed: 1, fps: job.settings.fps,
-          fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false
+          inputPath: src.path, outPath, ...job.settings,
         })
+        job.spec = specOf(result)
+        job.webpBytes = result.sizeBytes
+        job.webpFps = result.fps
+        saveJob(job)
         fs.copyFileSync(outPath, cached)
-        console.log(`pack ${pack.code}: ${name} ← ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames}f @ ${result.fps}fps`)
+        console.log(`pack ${pack.code}: ${name} ← source ${(result.sizeBytes / 1024).toFixed(0)}KB, ${result.frames}f @ ${result.fps}fps`)
       }
     }
     stickers.push({ image_file: name, emojis: normaliseEmojis(job.emojis) })
@@ -479,7 +617,7 @@ async function assemblePack(
   onProgress?.({ progress: 0.95, stage: 'Writing tray & manifest' })
   const tray = jobList.find(j => j.trayPath && fs.existsSync(j.trayPath))
   if (!tray) throw new Error('Tray icon missing — no sticker in the pack has one')
-  fs.copyFileSync(tray.trayPath!, path.join(packDir, 'tray.png'))
+  fs.copyFileSync(tray.trayPath!, out('tray.png'))
 
   const version = bumpPackVersion(pack.code)
   const manifest = {
@@ -491,14 +629,20 @@ async function assemblePack(
     animated: true,
     stickers
   }
-  fs.writeFileSync(path.join(packDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+  fs.writeFileSync(out('manifest.json'), JSON.stringify(manifest, null, 2))
+
+  // Everything is on disk and readable — only now replace the live pack.
+  fs.rmSync(packDir, { force: true, recursive: true })
+  fs.renameSync(stage, packDir)
   onProgress?.({ progress: 1, stage: 'Done' })
-  return manifest
+  // `included` is what actually shipped in the manifest — only those stickers'
+  // sources may be retired by the caller.
+  return { manifest, included: jobList.map(j => j.id) }
 }
 
 // Summarise a pack for the list UI: how many members are finished, whether built.
 function packSummary(p: Pack) {
-  const manifestFile = path.join(DATA, 'packs', p.code, 'manifest.json')
+  const manifestFile = path.join(PACKS, p.code, 'manifest.json')
   const built = fs.existsSync(manifestFile)
   const stickers = p.jobIds
     .map(id => jobs.get(id))
@@ -554,7 +698,7 @@ app.delete('/api/packs/:code', (req, res) => {
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
   const members = [...pack.jobIds]
   deletePack(pack.code)
-  fs.rmSync(path.join(DATA, 'packs', pack.code), { force: true, recursive: true })
+  fs.rmSync(path.join(PACKS, pack.code), { force: true, recursive: true })
   for (const jobId of members) if (countPacksWithJob(jobId) === 0) discardSticker(jobId)
   res.json({ ok: true })
 })
@@ -585,13 +729,31 @@ app.put('/api/packs/:code/stickers', (req, res) => {
   const valid = (Array.isArray(req.body.jobIds) ? req.body.jobIds.map(String) : [])
     .filter((id: string) => { const j = jobs.get(id); return j?.owner === req.userId && j.status === 'done' })
   const jobIds = dedupeMembership(valid)
+  if (jobIds.length > 30) {
+    res.status(400).json({ error: `WhatsApp packs cap at 30 stickers — this one has ${jobIds.length}` })
+    return
+  }
+  const dropped = (Array.isArray(req.body.jobIds) ? req.body.jobIds.length : 0) - jobIds.length
+  if (dropped > 0) {
+    res.status(400).json({ error: `${dropped} of the requested stickers are not finished encodes you own` })
+    return
+  }
   setPackStickers(pack.code, jobIds)
   res.json(packSummary({ ...pack, jobIds }))
 })
 
-app.post('/api/packs/:code/build', async (req, res) => {
+// assemblePack wipes and rewrites packDir, so two builds of one code at the same time
+// corrupt each other. The UI's `building` flag only guards a single tab.
+const buildsInFlight = new Map<string, Promise<Record<string, unknown>>>()
+
+app.post('/api/packs/:code/build', ah(async (req, res) => {
   const pack = ownedPack(req, req.params.code)
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
+
+  if (buildsInFlight.has(pack.code)) {
+    res.status(409).json({ error: 'This pack is already building — wait for it to finish' })
+    return
+  }
 
   // NDJSON stream so the UI can show per-sticker progress. Final line is
   // { done: true, ...manifest } or { error: "..." }.
@@ -602,18 +764,27 @@ app.post('/api/packs/:code/build', async (req, res) => {
     res.write(JSON.stringify(obj) + '\n')
   }
 
-  let manifest: Record<string, unknown>
+  let built: { manifest: Record<string, unknown>; included: string[] }
+  const run = assemblePack(pack, e => emit(e))
+  buildsInFlight.set(pack.code, run)
   try {
-    manifest = await assemblePack(pack, e => emit(e))
+    built = await run
   } catch (err) {
+    // The live pack is untouched by definition; only the staging dir needs removing.
+    fs.rmSync(path.join(PACKS, pack.code) + '.next', { force: true, recursive: true })
     emit({ error: err instanceof Error ? err.message : 'Pack assembly failed' })
     res.end()
     return
+  } finally {
+    buildsInFlight.delete(pack.code)
   }
+  const manifest = built.manifest
 
-  const manifestFile = path.join(DATA, 'packs', pack.code, 'manifest.json')
+  const manifestFile = path.join(PACKS, pack.code, 'manifest.json')
   if (fs.existsSync(manifestFile)) {
-    for (const jobId of pack.jobIds) {
+    // A member that failed to encode is not in the pack and keeps its source, so a
+    // partial failure cannot silently destroy work that produced nothing.
+    for (const jobId of built.included) {
       const job = jobs.get(jobId)
       const src = job && files.get(job.fileId)
       if (!src) continue
@@ -624,12 +795,12 @@ app.post('/api/packs/:code/build', async (req, res) => {
   }
   emit({ done: true, code: pack.code, ...manifest })
   res.end()
-})
+}))
 
 // ── public pack read (the phone; code is the capability, no auth) ─────────────
 app.get('/api/pack/:code', (req, res) => {
   if (!CODE_RE.test(req.params.code)) { res.status(400).json({ error: 'Invalid pack code' }); return }
-  const manifestFile = path.join(DATA, 'packs', req.params.code, 'manifest.json')
+  const manifestFile = path.join(PACKS, req.params.code, 'manifest.json')
   if (!fs.existsSync(manifestFile)) { res.status(404).json({ error: 'No pack built for this code' }); return }
   res.json(JSON.parse(fs.readFileSync(manifestFile, 'utf8')))
 })
@@ -637,9 +808,18 @@ app.get('/api/pack/:code', (req, res) => {
 app.get('/api/pack/:code/file/:name', (req, res) => {
   const name = /^[\w.-]{1,64}$/.test(req.params.name) ? req.params.name : null
   if (!CODE_RE.test(req.params.code) || !name) { res.status(400).json({ error: 'Invalid path' }); return }
-  const filePath = path.join(DATA, 'packs', req.params.code, name)
+  const filePath = path.join(PACKS, req.params.code, name)
   if (!fs.existsSync(filePath)) { res.status(404).json({ error: 'Not found' }); return }
   res.sendFile(filePath)
+})
+
+// Last resort for anything `ah` caught: a JSON error instead of a hung socket. A
+// streaming reply (NDJSON build) has already sent headers, so it just gets closed.
+app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction): void => {
+  const message = err instanceof Error ? err.message : 'Internal error'
+  console.error(`${req.method} ${req.originalUrl} failed:`, message)
+  if (res.headersSent) { res.end(); return }
+  res.status(500).json({ error: message })
 })
 
 if (fs.existsSync(WEB_DIST)) {
@@ -651,6 +831,19 @@ if (fs.existsSync(WEB_DIST)) {
 
 const PORT = Number(process.env.PORT) || 3210
 const HOST = process.env.HOST || '127.0.0.1'
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`StickerForge running → http://localhost:${PORT}`)
 })
+
+// A deploy restarts the service mid-encode. Stop accepting, give in-flight encodes a
+// window to finish (only completed jobs are persisted, so a killed one leaves an
+// orphan output file rather than a job pointing at a half-written one), then exit.
+let closing = false
+function shutdown(signal: string): void {
+  if (closing) return
+  closing = true
+  console.log(`${signal}: draining ${encodeQueue.active} encode(s), ${encodeQueue.queued} queued`)
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(0), 15_000).unref()
+}
+for (const sig of ['SIGTERM', 'SIGINT'] as const) process.on(sig, () => shutdown(sig))

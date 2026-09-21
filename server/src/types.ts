@@ -8,6 +8,8 @@ export interface VideoMeta {
   pixFmt: string
   hasAudio: boolean
   sizeBytes: number
+  /** Display-matrix rotation in degrees. Dimensions above are already post-rotation. */
+  rotation?: number
 }
 
 export type QualityLevel = 'good' | 'ok' | 'warn'
@@ -69,6 +71,22 @@ export interface Pack {
 
 export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'
 
+/**
+ * Measured properties of a finished sticker, read back out of the encoded WebP
+ * itself. Everything the UI shows as "within WhatsApp limits" comes from here,
+ * never from what the encode was asked for.
+ */
+export interface StickerSpec {
+  width: number
+  height: number
+  frames: number
+  fps: number
+  duration: number
+  sizeBytes: number
+  /** Luma SSIM vs the source frame; null when it could not be measured. */
+  ssim: number | null
+}
+
 export interface Job {
   id: string
   owner: string
@@ -85,6 +103,8 @@ export interface Job {
   /** WhatsApp WebP size/fps once the AnimEncoder pass has run. */
   webpBytes?: number
   webpFps?: number
+  /** Measured from the encoded WebP — the only figures the UI may present as spec. */
+  spec?: StickerSpec
   outMeta?: VideoMeta | null
   error?: string
   /** 1–3 emojis for the WhatsApp manifest. Absent means "not chosen yet". */

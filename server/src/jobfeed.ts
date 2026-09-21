@@ -1,4 +1,4 @@
-import type { JobStatus } from './types.js'
+import type { JobStatus, StickerSpec } from './types.js'
 
 export interface JobEvent {
   jobId: string
@@ -7,6 +7,8 @@ export interface JobEvent {
   stage: string
   sizeBytes?: number
   error?: string
+  /** Present once the WebP has been measured; absent while it is still encoding. */
+  spec?: StickerSpec
 }
 
 // In-process fan-out, one set of listeners per job. Encodes are already in-process

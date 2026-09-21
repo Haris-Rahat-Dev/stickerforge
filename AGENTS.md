@@ -20,7 +20,8 @@ npm install
 npm run dev          # API :3210 + Vite :5173 (proxy /api → 3210)
 npm run build && npm start   # one process, UI+API on :3210
 npm run typecheck
-npm test             # node:test unit tests (auth, model, flow, …)
+npm test             # node:test unit tests (auth, model, flow, reap, probe, …)
+npm run test:corpus  # ~4 min: synthesises 7 clips, encodes them, asserts measured spec
 npm run test:e2e     # assertions; needs SAMPLE_A/B in ~/Downloads (see scripts/e2e.sh)
 ```
 
@@ -60,6 +61,7 @@ server/src/
   index.ts           Express routes, files/jobs maps (SQLite-backed)
   db.ts              node:sqlite persistence — files + done jobs survive restart
   queue.ts           in-process concurrency limiter (caps parallel encodes)
+  reap.ts            boot-time sweep of media no record can reach (orphans, .next)
   probe.ts           ffprobe + quality score + cropdetect
   convert.ts         two-pass VP9 WebM, <500KB with bitrate retry
   budget.ts          WhatsApp WebP fps ladder + motion-budget (24fps floor)
@@ -68,7 +70,7 @@ server/src/
   sticker.ts         derived editability, StickerView, emoji normalization
   auth.ts            firebase-admin ID token verify + public-path allowlist
   types.ts           shared models
-android/             Java, zero deps — StickerContentProvider + one-screen importer
+android/             Java + AndroidX/Material — StickerContentProvider (dependency-free) + importer screen
 data/                uploads, outputs, trays, packs, stickerforge.db (gitignored)
 ```
 
@@ -124,6 +126,14 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 
 **All stickers** is a third route listing every sticker you own, with client-side search over name, emojis, and containing pack names. Deleting there removes the sticker from every pack; removing from a pack canvas only drops the membership and lets the reference count decide.
 
+## Verified output, not requested output
+
+Every finished sticker carries a `spec` (`StickerSpec` in `types.ts`) **measured out of the encoded WebP** by `inspectWebp()`/`frameSsim()` in `webp.ts` — canvas size, real frame count, real average fps from the frame durations, real duration, and luma SSIM of the muxed first frame against the PNG frame that produced it. Nothing the UI presents as "within WhatsApp limits" may come from the settings that were asked for; `specLines()` in `web/src/budget.ts` judges the measured file. Images no longer fabricate `outMeta`.
+
+This is what caught the single-frame defect below, and it is cheap (two 512² ffmpeg passes on a job that already takes ~30s).
+
+**Persistence rule:** `files.path`, `jobs.outputPath` and `jobs.trayPath` are stored **relative to `DATA_DIR`** and re-rooted on load. A backup restored to a different directory, or a changed `DATA_DIR`, therefore still resolves. `initDb()` normalises legacy absolute rows once (idempotent fixpoint) after copying the DB to `stickerforge.db.pre-path-normalise.bak`; it never touches files, and a path whose target is missing is left exactly as it was. Boot now logs how many records it drops instead of dropping them silently.
+
 ## Live encode progress
 
 `GET /api/job/:id/stream` is a Server-Sent Events stream of `{status, progress, stage, sizeBytes, error}`. It emits current state immediately, closes itself on a terminal status, and pings every 25s to survive idle proxies. The client's `watchJob()` uses it and falls back to polling if the stream cannot be opened.
@@ -134,7 +144,14 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 
 - `npm run dev` dies if the API process is killed; Vite alone is a blank proxy. Hard-refresh (⌘⇧R) after CSS/geometry fixes.
 - E2E samples are specific files in `~/Downloads`; missing files → suite fails at upload.
-- Pack WebP is built from the **already-converted WebM** (crop/scale/trim/speed/border/audio all baked in). The WebP pass must re-apply **none** of `job.settings` — only carry `fps` (source cap; quality-first then 24fps floor via `img2webp`). Spreading `...job.settings` double-processes. Convert writes `data/webp-cache/<jobId>.webp` at Add so pack build is usually a copy. See `assemblePack` in `index.ts`.
+- **Never encode the pack WebP from the WebM.** That second lossy generation was the pixelation. Convert writes `data/webp-cache/<jobId>.webp` at Add (from the original, `job.settings` applied once), and `assemblePack` copies that. On a cache miss it **re-encodes from the original source** with `...job.settings` — correct there, and only there. If the source is gone too it fails closed and names the sticker; do not "fix" that by falling back to the WebM.
+- **`probeVideo` returns display dimensions, not coded ones.** ffprobe's `width/height` are coded; ffmpeg auto-applies the display matrix on decode. A portrait phone clip is coded 1920×1080 with `rotation: -90` and decodes as 1080×1920 — cropping against the coded numbers puts the box on the wrong axis. `displaySize()` swaps for ±90/270. Everything downstream (`squareCrop`, `sanitizeCrop`, the crop-box overlay, `cropdetect`) assumes display space.
+- **A motionless trim must still be an animation.** `collapseHolds` can reduce a still clip to one held frame; feeding `img2webp` that frame twice yields a **static** WebP (it dedupes them), which WhatsApp refuses inside an animated pack. `muxImg2Webp` special-cases `frames.length === 1` to `cwebp` + two `webpmux -frame` entries. The `spec.frames >= 2` assertion in `webp.test.ts` guards it.
+- `-t` in `webp.ts`/`convert.ts` is a **source** span while `setpts=PTS/speed` compresses the timeline afterwards. `planSpan()` in `budget.ts` returns `srcSpan` (for `-t`) and `outDur` (for everything else) — never pass one where the other belongs. `parseSettings` clamps the trim so `outDur` can't exceed 6s at any speed.
+- **Hold detection thresholds are measured, not guessed.** At 16×16 gray a re-encoded photographic still peaks at 0–1 per pixel; a ticking counter peaks at 6, a mandelbrot zoom at 4–6, handheld phone footage at 28–55. `HOLD_MEAN_MAX = 0.5` / `HOLD_PEAK_MAX = 2` sit in that gap. Loosening them silently throws away motion — that is what a perceptual hash did here.
+- An all-motion 6s clip is not a corpus fixture: it took 23 minutes to encode. The corpus uses a 6s *held* scene to prove duration legality and leaves the busy-6s rejection to `budget.test.ts`.
+- `verify()` must be `return await` inside the `try`: a bare `return verify(...)` runs the `finally` temp cleanup while the measurement is still writing into it, which intermittently throws `ENOTEMPTY` and yields `ssim: null`.
+- `npm test` lists test files explicitly by glob. A `server/test/index.js` barrel used to import a hardcoded list, so new `*.test.ts` files were silently skipped (15 tests were not running).
 - `adb push` files are invisible to Sticker.ly until a media scan (`adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE`).
 - WhatsApp’s built-in sticker maker re-crops; edge text dies without the white-border toggle.
 - Duplicate identical WebMs can be rejected by importer apps.
@@ -157,6 +174,7 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 - Prefer generic host/device copy in UI and docs — no Mac- or USB-specific wording.
 - For the Ampere Cursor Automation, put OCI credentials as Runtime Secrets on the selected Cloud Environment (not Build Secrets); redacted values still mean present.
 - Never search/enumerate credential files on disk (`find`/`mdfind`/broad `ls` for `*.pem`, keys, `.env`, etc.); ask for an exact path or have the user paste — EDR treats that hunt as sensitive-data enumeration.
+- Prefer the trim timeline as the primary fine-tune control; keep framing/speed/fps secondary and clearly preview-matched — non-trim fine-tune knobs have repeatedly felt confusing or ineffective.
 
 ## Learned Workspace Facts
 
@@ -166,9 +184,9 @@ Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and a
 - Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold, ~every 5 minutes), not a checked-in local loop.
 - Hosted app HTTP is Tailscale-only (VM iptables allows `:3210` on `tailscale0`; public `:3210` closed); laptop and phone need Tailscale on the same account. VM tailnet hostname is `stickerforge`.
 - VM SSH uses the launch `authorized_keys` pubkey (not an OCI console `.pem`); Tailscale SSH is not enabled — `ssh ubuntu@<tailscale-ip>` still authenticates with that key over the private path.
-- Android debug builds bake `API_BASE` to the Tailscale host so pack fetch works without USB/`adb reverse`. Pack/editor/web+server deploys need no new APK; rebuild the app only when baked `API_BASE` or the ContentProvider contract changes.
-- Web/server deploy is `./deploy.sh` (local build + rsync); the VM tree is not a git clone (`git pull` fails). After dependency changes, run `npm install` on the VM, then restart the `stickerforge` systemd unit. No CI/push-to-deploy yet.
+- Web/server deploy is `./deploy.sh` (local build + rsync); the VM tree is not a git clone (`git pull` fails). After dependency changes, run `npm install` on the VM, then restart the `stickerforge` systemd unit. No CI/push-to-deploy yet. Android debug builds bake `API_BASE` to the Tailscale host; rebuild the APK only when that or the ContentProvider contract changes — pack/editor deploys need no new APK.
 - After a successful build, “Show install” reopens the install drawer without rebuilding (loads the cached pack via `GET /api/pack/:code`).
 - Hosted backups: `backup.sh` on the VM (SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7); bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal; `.backup.env` is gitignored and holds the Object Storage namespace on the VM; nightly cron runs on the VM (see `docs/backups.md`).
 - OCI MCP “connected” only means the server process started; Object Storage/IAM calls still need a valid `OCI_CONFIG_PROFILE` with working API signing.
 - Auth: `firebase-admin` when `FIREBASE_SERVICE_ACCOUNT` is set; otherwise anonymous `sf_uid` cookies and no sign-in UI so dogfood/deploy works without a Firebase project.
+- Older Homebrew `img2webp` may reject `-sharp_yuv` (“Unknown option”); WebP mux retries skipping unknown flags — do not assume libwebp feature parity across Mac and the VM.

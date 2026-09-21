@@ -14,6 +14,24 @@ export function capFps(sourceFps: number): number {
   return Math.min(MAX_STICKER_FPS, n)
 }
 
+/**
+ * `-t` is applied to the *input*, but `setpts=PTS/speed` compresses the timeline
+ * afterwards — so the two numbers are not the same thing. Reading `outDur` seconds
+ * of source at 2× played back half the requested clip; reading `srcSpan` gets the
+ * whole range and lets the speed filter decide how long that takes.
+ */
+export function planSpan(startSec: number, endSec: number, speed: number): { srcSpan: number; outDur: number } {
+  const srcSpan = Math.max(0.1, endSec - startSec)
+  const s = speed > 0 ? speed : 1
+  return { srcSpan, outDur: Math.max(0.3, srcSpan / s) }
+}
+
+/** Longest source trim that still yields a legal output at this speed. */
+export function maxSrcSpanForSpeed(speed: number): number {
+  const s = speed > 0 ? speed : 1
+  return MAX_STICKER_SEC * s
+}
+
 /** Quality-first ladder. Never upsample. Never drop below 24 unless source is already slower. */
 export function fpsSteps(sourceFps: number): number[] {
   const top = capFps(sourceFps)
@@ -49,4 +67,34 @@ export function motionBudget(durationSec: number, sourceFps: number): {
     tight: durationSec > maxSeconds + 0.01,
     maxSeconds,
   }
+}
+
+export interface SizeSample {
+  q: number
+  bytes: number
+}
+
+/**
+ * Can the cheapest rung of the ladder possibly fit?
+ *
+ * Muxing is the expensive part of an encode — eight full passes over 124 frames on a
+ * 1 GB VM is minutes — and a clip that comes out at 747KB on q50 was never going to
+ * reach 480KB. Two measurements at the same frame count give the quality exponent;
+ * the frame ratio then carries the projection to the last rung. The margin keeps it
+ * conservative: it only bails when even a generous reading of the curve fails.
+ */
+export function projectedNeverFits(
+  samples: SizeSample[],
+  frameRatio: number,
+  lowestQ: number,
+  target: number,
+): boolean {
+  if (samples.length < 2) return false
+  const [a, b] = [samples[samples.length - 2], samples[samples.length - 1]]
+  if (a.q <= b.q || a.bytes <= 0 || b.bytes <= 0) return false
+  const exponent = Math.log(a.bytes / b.bytes) / Math.log(a.q / b.q)
+  // Clamp: below 1 the curve is implausibly flat, above 4 it is noise-driven.
+  const e = Math.min(4, Math.max(1, exponent))
+  const projected = b.bytes * Math.pow(lowestQ / b.q, e) * Math.max(0, frameRatio)
+  return projected > target
 }

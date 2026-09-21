@@ -4,9 +4,11 @@ import type { Request, Response, NextFunction } from 'express'
 
 // The Android app fetches a built pack by its unguessable code and sends no token.
 // These two shapes — and only these — must stay reachable without authentication.
+// Same charset and length as CODE_RE in index.ts — the two must not disagree, or a
+// code that auth waves through gets rejected by the route that serves it.
 const PUBLIC = [
-  /^\/api\/pack\/[A-Za-z0-9_-]+$/,
-  /^\/api\/pack\/[A-Za-z0-9_-]+\/file\/[A-Za-z0-9_.-]+$/,
+  /^\/api\/pack\/[a-z0-9-]{1,32}$/,
+  /^\/api\/pack\/[a-z0-9-]{1,32}\/file\/[\w.-]{1,64}$/,
 ]
 
 export const publicPath = (pathname: string): boolean => PUBLIC.some(re => re.test(pathname))

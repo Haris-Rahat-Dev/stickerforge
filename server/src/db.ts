@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import type { FileRecord, Job, Pack } from './types.js'
@@ -8,9 +9,41 @@ import type { FileRecord, Job, Pack } from './types.js'
 // JSON). Packs are a small relational model so membership + per-pack identifier/
 // version can be queried. Built-in node:sqlite (Node 22.5+) — no dependency.
 let db: DatabaseSync | null = null
+let DATA = ''
+
+// Paths are stored relative to DATA so that restoring a backup onto a different
+// directory, or changing DATA_DIR, keeps the existing rows resolvable. Absolute
+// paths in the DB used to make every sticker vanish silently at boot, because the
+// boot filter drops anything fs.existsSync rejects.
+function toStored(p: string): string {
+  const rel = path.relative(DATA, p)
+  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : p
+}
+
+function toResolved(p: string): string {
+  if (!path.isAbsolute(p)) return path.resolve(DATA, p)
+  if (fs.existsSync(p)) return p
+  // Written by a different DATA_DIR — re-root whatever followed that dir, but only
+  // when something is actually there, so a dead path is never disguised as a live one.
+  const marker = `${path.sep}data${path.sep}`
+  const i = p.lastIndexOf(marker)
+  if (i >= 0) {
+    const rerooted = path.join(DATA, p.slice(i + marker.length))
+    if (fs.existsSync(rerooted)) return rerooted
+  }
+  return p
+}
+
+function rewriteJson(rowId: string, table: string, mutate: (rec: Record<string, unknown>) => Record<string, unknown>): void {
+  const row = db!.prepare(`SELECT json FROM ${table} WHERE id = ?`).get(rowId) as { json: string } | undefined
+  if (!row) return
+  const rec = JSON.parse(row.json) as Record<string, unknown>
+  db!.prepare(`UPDATE ${table} SET json = ? WHERE id = ?`).run(JSON.stringify(mutate(rec)), rowId)
+}
 
 export function initDb(dataDir: string): void {
-  db = new DatabaseSync(path.join(dataDir, 'stickerforge.db'))
+  DATA = path.resolve(dataDir)
+  db = new DatabaseSync(path.join(DATA, 'stickerforge.db'))
   db.exec(`
     CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS jobs  (id TEXT PRIMARY KEY, file_id TEXT NOT NULL, json TEXT NOT NULL);
@@ -30,20 +63,76 @@ export function initDb(dataDir: string): void {
   ]) {
     try { db.exec(`ALTER TABLE packs ADD COLUMN ${col}`) } catch { /* column already exists */ }
   }
+  normaliseStoredPaths()
+}
+
+// Rewriting paths is the only mutation init performs, it never touches files, and
+// the pre-migration database is copied aside first.
+const pathFields = (rec: Record<string, unknown>): string[] =>
+  [rec.path, rec.outputPath, rec.trayPath].filter((v): v is string => typeof v === 'string')
+
+// The rewrite is a fixpoint: once a value is stored in its DATA-relative form it no
+// longer qualifies, so this runs exactly once per row and never churns.
+function needsRewrite(rec: Record<string, unknown>): boolean {
+  return pathFields(rec).some(v => toStored(toResolved(v)) !== v)
+}
+
+function normaliseStoredPaths(): void {
+  const tables = ['files', 'jobs'] as const
+  const dirty = tables.map(t => ({
+    table: t,
+    rows: (db!.prepare(`SELECT id, json FROM ${t}`).all() as Array<{ id: string; json: string }>)
+      .filter(r => needsRewrite(JSON.parse(r.json))),
+  }))
+  const total = dirty.reduce((n, d) => n + d.rows.length, 0)
+  if (!total) return
+
+  const file = path.join(DATA, 'stickerforge.db')
+  const backup = `${file}.pre-path-normalise.bak`
+  if (!fs.existsSync(backup)) fs.copyFileSync(file, backup)
+
+  for (const { table, rows } of dirty) {
+    for (const r of rows) {
+      rewriteJson(r.id, table, rec => {
+        const next = { ...rec }
+        for (const key of ['path', 'outputPath', 'trayPath'] as const) {
+          if (typeof next[key] === 'string') next[key] = toStored(toResolved(String(next[key])))
+        }
+        return next
+      })
+    }
+  }
+  console.log(`db: re-rooted stored paths in ${total} row(s) onto ${DATA}`)
 }
 
 // ── files & jobs (owner is inside the JSON) ──────────────────────────────────
 export function loadFiles(): FileRecord[] {
-  return db!.prepare('SELECT json FROM files').all().map(r => JSON.parse((r as { json: string }).json))
+  return db!.prepare('SELECT json FROM files').all().map(r => {
+    const rec = JSON.parse((r as { json: string }).json) as FileRecord
+    return { ...rec, path: toResolved(rec.path) }
+  })
 }
 export function loadJobs(): Job[] {
-  return db!.prepare('SELECT json FROM jobs').all().map(r => JSON.parse((r as { json: string }).json))
+  return db!.prepare('SELECT json FROM jobs').all().map(r => {
+    const rec = JSON.parse((r as { json: string }).json) as Job
+    return {
+      ...rec,
+      outputPath: toResolved(rec.outputPath),
+      trayPath: rec.trayPath ? toResolved(rec.trayPath) : rec.trayPath,
+    }
+  })
 }
 export function saveFile(rec: FileRecord): void {
-  db!.prepare('INSERT OR REPLACE INTO files (id, json) VALUES (?, ?)').run(rec.id, JSON.stringify(rec))
+  db!.prepare('INSERT OR REPLACE INTO files (id, json) VALUES (?, ?)')
+    .run(rec.id, JSON.stringify({ ...rec, path: toStored(rec.path) }))
 }
 export function saveJob(job: Job): void {
-  db!.prepare('INSERT OR REPLACE INTO jobs (id, file_id, json) VALUES (?, ?, ?)').run(job.id, job.fileId, JSON.stringify(job))
+  db!.prepare('INSERT OR REPLACE INTO jobs (id, file_id, json) VALUES (?, ?, ?)')
+    .run(job.id, job.fileId, JSON.stringify({
+      ...job,
+      outputPath: toStored(job.outputPath),
+      trayPath: job.trayPath ? toStored(job.trayPath) : job.trayPath,
+    }))
 }
 // A source and the stickers made from it now have independent lifetimes: building a
 // pack deletes the source while the sticker lives on. Deleting the file row must
@@ -77,6 +166,10 @@ export function createPack(owner: string, name: string): Pack {
 export function getPack(code: string): Pack | null {
   const row = db!.prepare('SELECT * FROM packs WHERE code = ?').get(code) as PackRow | undefined
   return row ? rowToPack(row) : null
+}
+
+export function listAllPacks(): Pack[] {
+  return (db!.prepare('SELECT * FROM packs').all() as PackRow[]).map(rowToPack)
 }
 
 export function listPacks(owner: string): Pack[] {
