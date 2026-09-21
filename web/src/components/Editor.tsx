@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, cancelJob } from '../api.js'
+import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
-import { capFps, MAX_STICKER_SEC, motionBudget } from '../budget.js'
+import { capFps, MAX_STICKER_SEC, motionBudget, openingTrimEnd } from '../budget.js'
 import Timeline from './Timeline.jsx'
 
 const MIN_SPAN = 0.3
-const MAX_OUT_DUR = 6
 
 function squareCrop(w: number, h: number): CropRect {
   const s = Math.min(w, h)
@@ -32,24 +31,23 @@ export default function Editor({
   const duration = Math.max(meta.duration, 0.5)
   const fps = capFps(meta.fps)
   const isImage = file.kind === 'image'
+  const needsFraming = Math.abs(meta.width / meta.height - 1) > 0.02
 
   const [start, setStart] = useState(0)
-  const [end, setEnd] = useState(() => {
-    if (isImage) return duration
-    const keep = motionBudget(duration, meta.fps).maxSeconds
-    const joke = duration > 4 ? 4 : duration
-    return Math.min(duration, MAX_OUT_DUR, keep, joke)
-  })
+  const [end, setEnd] = useState(() => (isImage ? duration : openingTrimEnd(duration, meta.fps)))
   const [crop, setCrop] = useState<CropRect>(() => squareCrop(meta.width, meta.height))
-  const [pad, setPad] = useState(false)
+  const [pad, setPad] = useState(needsFraming)
   const [cropDetecting, setCropDetecting] = useState(false)
   const [border, setBorder] = useState(false)
   const [stripUrl, setStripUrl] = useState<string | null>(null)
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<Job | null>(null)
+  const [fitting, setFitting] = useState(!isImage)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const scrubbing = useRef(false)
+  const trimTouched = useRef(false)
+  const encodeKey = `sf-encode:${file.id}`
   const rangeRef = useRef({ start, end })
   rangeRef.current = { start, end }
   const running = job?.status === 'running'
@@ -68,12 +66,32 @@ export default function Editor({
   }, [file.id, isImage])
 
   useEffect(() => {
+    const saved = sessionStorage.getItem(encodeKey)
+    if (!saved) return
+    setJobId(saved)
+    setJob({ status: 'running', progress: 0, stage: 'resuming', id: saved, fileId: file.id, settings: {} as ConvertRequest })
+  }, [encodeKey, file.id])
+
+  useEffect(() => {
+    if (isImage) return
+    let dead = false
+    fitSpan(file.id).then(seconds => {
+      if (dead || seconds == null) return
+      setEnd(prev => trimTouched.current ? prev : Math.max(prev, Math.min(duration, seconds)))
+    }).finally(() => { if (!dead) setFitting(false) })
+    return () => { dead = true }
+  }, [file.id, isImage, duration])
+
+  useEffect(() => {
     if (!jobId) return
+    const forget = (): void => { sessionStorage.removeItem(encodeKey) }
     void watchJob(jobId, j => setJob(prev => prev ? { ...prev, progress: j.progress, stage: j.stage } : prev))
       .then(j => {
+        forget()
         onAddedToPack?.(jobId, j.sizeBytes, replaceAt)
       })
       .catch(err => {
+        forget()
         const message = err instanceof Error ? err.message : 'failed'
         // A cancel is a choice, not a fault — go back to idle instead of showing red.
         if (message.toLowerCase().includes('cancel')) { setJob(null); setJobId(null); return }
@@ -84,7 +102,7 @@ export default function Editor({
           settings: {} as ConvertRequest,
         })
       })
-  }, [jobId, replaceAt])
+  }, [jobId, replaceAt, encodeKey, file.id])
 
   useEffect(() => {
     const v = videoRef.current
@@ -116,17 +134,17 @@ export default function Editor({
   const outDur = end - start
   const budget = motionBudget(outDur, meta.fps)
   const maxSpan = Math.min(MAX_STICKER_SEC, duration)
-  const srcAspect = meta.width / meta.height
-  const needsFraming = Math.abs(srcAspect - 1) > 0.02
   const fit: FitMode = pad ? 'contain' : 'cover'
 
   const setRange = (s: number, e: number): void => {
+    trimTouched.current = true
     let span = e - s
     if (span < MIN_SPAN) { e = s + MIN_SPAN; if (e > duration) { e = duration; s = Math.max(0, e - MIN_SPAN) } }
     setStart(s); setEnd(e)
   }
 
   const keepMotion = (): void => {
+    trimTouched.current = true
     const span = Math.min(budget.maxSeconds, duration - start)
     let s = start
     let e = s + span
@@ -136,12 +154,14 @@ export default function Editor({
 
   const doConvert = async (): Promise<void> => {
     if (!isImage && !budget.ok) return
+    trimTouched.current = true
     setJob({ status: 'running', progress: 0, stage: 'starting', id: '', fileId: file.id, settings: {} as ConvertRequest })
     try {
       const id = await convert({
         fileId: file.id, start, end, speed: 1, fps, fit,
         padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
       })
+      sessionStorage.setItem(encodeKey, id)
       setJobId(id)
     } catch (err) {
       setJob({ status: 'error', error: err instanceof Error ? err.message : 'failed', progress: 0, stage: '', id: '', fileId: file.id, settings: {} as ConvertRequest })
@@ -157,7 +177,9 @@ export default function Editor({
             <span className="meta-line">
               {isImage
                 ? `image · ${meta.width}×${meta.height}`
-                : `${meta.width}×${meta.height} · ${fps}fps · drag the box to reframe`}
+                : pad
+                  ? `${meta.width}×${meta.height} · ${fps}fps · whole frame inside the square`
+                  : `${meta.width}×${meta.height} · ${fps}fps · drag the box to reframe`}
             </span>
           </div>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -213,11 +235,20 @@ export default function Editor({
                     : budget.tight
                     ? (
                       <>
-                        <span>{outDur.toFixed(1)}s may not fit if it's all motion — holds are free</span>
+                        <span>
+                          {fitting ? 'Checking holds… ' : ''}
+                          {fps}fps motion fits about {budget.maxSeconds.toFixed(1)}s. Still frames can run longer.
+                        </span>
                         <button className="btn btn-sm" onClick={keepMotion}>Safer trim · {budget.maxSeconds.toFixed(1)}s</button>
                       </>
                     )
-                    : <span>{outDur.toFixed(1)}s · {fps}fps WhatsApp</span>}
+                    : fitting
+                    ? <span>Checking how much of this clip can stay…</span>
+                    : <span>
+                        {outDur.toFixed(1)}s
+                        {duration - outDur > 0.05 ? ` of ${duration.toFixed(1)}s` : ''}
+                        {` · ${fps}fps`}
+                      </span>}
                 </div>
               </>
             )}

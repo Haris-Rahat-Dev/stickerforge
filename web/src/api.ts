@@ -57,6 +57,13 @@ export async function filmstripUrl(id: string): Promise<string | null> {
   } catch { return null }
 }
 
+export async function fitSpan(id: string): Promise<number | null> {
+  const res = await apiFetch(`${BASE}/api/fit-span/${id}`)
+  if (!res.ok) return null
+  const json = await res.json() as { seconds?: number }
+  return typeof json.seconds === 'number' ? json.seconds : null
+}
+
 export async function detectCrop(id: string): Promise<CropRect | null> {
   const res = await apiFetch(`${BASE}/api/cropdetect/${id}`)
   if (!res.ok) return null

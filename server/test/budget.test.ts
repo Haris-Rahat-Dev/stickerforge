@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { capFps, fpsSteps, maxSecondsForMotion, motionBudget, projectedNeverFits, WEBP_TARGET } from '../src/budget.ts'
+import { capFps, fitSpanSeconds, fpsSteps, maxSecondsForMotion, motionBudget, openingTrimEnd, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET } from '../src/budget.ts'
 
 test('fps ladder keeps 30 then 24, never the old 8fps dump', () => {
   assert.deepEqual(fpsSteps(30), [30, 24])
@@ -29,6 +29,26 @@ test('motion budget prefers ~4s at 30fps over dropping fps', () => {
 
 test('6s WhatsApp cap still binds slow gifs', () => {
   assert.equal(maxSecondsForMotion(15), 6)
+})
+
+test('opening trim keeps a slow clip whole and only shortens busy 30fps', () => {
+  assert.equal(openingTrimEnd(5, 15), 5)
+  assert.equal(openingTrimEnd(8, 15), 6)
+  assert.equal(openingTrimEnd(3, 30), 3)
+  assert.equal(openingTrimEnd(10, 30), 4.1)
+})
+
+test('a busy higher fps is skipped before mux; the last fps and a held clip are not', () => {
+  assert.equal(skipFpsBeforeMux(180, 30, false), true)
+  assert.equal(skipFpsBeforeMux(180, 30, true), false)
+  assert.equal(skipFpsBeforeMux(40, 30, false), false)
+  assert.equal(skipFpsBeforeMux(0, 30, false), false)
+})
+
+test('fit span keeps the probed window when holds fit', () => {
+  assert.equal(fitSpanSeconds(8, 30, 40), 6)
+  assert.equal(fitSpanSeconds(5, 15, 70), 5)
+  assert.equal(fitSpanSeconds(10, 30, 180), 4.1)
 })
 
 const KB = 1024

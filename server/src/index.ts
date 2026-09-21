@@ -3,11 +3,12 @@ import multer from 'multer'
 import path from 'node:path'
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { convertToSticker, extractTray } from './convert.js'
-import { convertToAnimatedWebp, imageToAnimatedWebp, type WebpResult } from './webp.js'
-import { capFps, maxSrcSpanForSpeed, motionBudget } from './budget.js'
+import { convertToAnimatedWebp, imageToAnimatedWebp, probeHoldCount, type WebpResult } from './webp.js'
+import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd } from './budget.js'
 import { createLimiter } from './queue.js'
 import { reapOrphans } from './reap.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
@@ -321,6 +322,26 @@ app.get('/api/cropdetect/:id', ah(async (req, res) => {
   res.json(rec.suggestedCrop)
 }))
 
+// One 16×16 pass over the first 6s. If the holds fit, the editor keeps that
+// window; otherwise it stays on the safe all-motion trim.
+app.get('/api/fit-span/:id', ah(async (req, res) => {
+  const rec = ownedFile(req, req.params.id)
+  if (!rec) { res.status(404).json({ error: 'Not found' }); return }
+  const fallback = openingTrimEnd(rec.meta.duration, rec.meta.fps)
+  if (rec.kind === 'image') { res.json({ seconds: rec.meta.duration }); return }
+  const fps = capFps(rec.meta.fps)
+  const span = Math.max(0.1, Math.min(rec.meta.duration, MAX_STICKER_SEC))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-span-'))
+  try {
+    const held = await probeHoldCount(rec.path, 0, span, fps, '', tmp)
+    res.json({ seconds: fitSpanSeconds(rec.meta.duration, rec.meta.fps, held) })
+  } catch {
+    res.json({ seconds: fallback })
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}))
+
 function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null, controller?: AbortController): Job {
   const jobId = crypto.randomUUID()
   // Videos: WebM for Sticker.ly, then img2webp cache for WhatsApp. Images skip VP9
@@ -514,9 +535,7 @@ app.post('/api/batch', async (req, res) => {
       settings = { start: 0, end: IMAGE_DUR, speed: 1, fps: IMAGE_FPS, fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false }
     } else {
       const fps = capFps(rec.meta.fps)
-      const keep = motionBudget(rec.meta.duration, rec.meta.fps).maxSeconds
-      const joke = rec.meta.duration > 4 ? 4 : rec.meta.duration
-      const end = Math.min(rec.meta.duration, keep, joke)
+      const end = openingTrimEnd(rec.meta.duration, rec.meta.fps)
       const detected = await detectCrop(rec.path, rec.meta).catch(() => null)
       const crop = detected && (detected.w < rec.meta.width - 8 || detected.h < rec.meta.height - 8)
         ? sanitizeCrop(detected, rec.meta)

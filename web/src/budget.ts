@@ -34,6 +34,13 @@ export function maxSecondsForMotion(fps: number): number {
   return 0.3
 }
 
+/** Where the trim opens: the whole clip, capped at 6s and at what this fps can fit. */
+export function openingTrimEnd(durationSec: number, sourceFps: number): number {
+  const duration = Math.max(0, durationSec)
+  const keep = maxSecondsForMotion(capFps(sourceFps))
+  return Math.min(duration, MAX_STICKER_SEC, keep)
+}
+
 export function motionBudget(durationSec: number, sourceFps: number): {
   fps: number
   ok: boolean

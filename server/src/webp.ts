@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { buildFilters } from './convert.js'
-import { fpsSteps, planSpan, projectedNeverFits, WEBP_TARGET, type SizeSample } from './budget.js'
+import { fpsSteps, planSpan, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
 import type { ConvertSettings } from './types.js'
 
 export type WebpOptions = Omit<ConvertSettings, 'speed'> & {
@@ -187,6 +187,38 @@ async function frameSignatures(framesDir: string, count: number, tmp: string): P
   return sigs
 }
 
+/**
+ * Cheap stand-in for the real extract: 16×16 gray frames, same hold rule.
+ * Used to skip a fps that cannot fit before writing 512px PNGs and muxing them.
+ * A failure returns 0 so the caller encodes anyway.
+ */
+export async function probeHoldCount(
+  inputPath: string,
+  start: number,
+  srcSpan: number,
+  fps: number,
+  preVf: string,
+  tmp: string,
+): Promise<number> {
+  const raw = path.join(tmp, `probe-${Math.round(fps * 100)}.gray`)
+  const chain = [preVf, `fps=${fps}`, `scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`]
+    .filter(Boolean).join(',')
+  try {
+    await run('ffmpeg', [
+      '-ss', String(start), '-t', String(srcSpan), '-i', inputPath,
+      '-vf', chain, '-f', 'rawvideo', '-y', raw,
+    ])
+  } catch {
+    return 0
+  }
+  const buf = await readFile(raw).catch(() => Buffer.alloc(0))
+  const stride = SIG_SIDE * SIG_SIDE
+  const sigs: Uint8Array[] = []
+  for (let off = 0; off + stride <= buf.length; off += stride) sigs.push(buf.subarray(off, off + stride))
+  if (sigs.length === 0) return 0
+  return collapseHolds(sigs, Math.max(8, Math.round(1000 / fps))).length
+}
+
 async function holdItems(framesDir: string, frames: string[], frameMs: number, tmp: string): Promise<HeldFrame[]> {
   const sigs = await frameSignatures(framesDir, frames.length, tmp)
   // If the signatures don't line up one-for-one, extract no holds rather than
@@ -262,6 +294,18 @@ export async function convertToAnimatedWebp(
       const isLast = outFps === steps[steps.length - 1]
       const base = tier / steps.length
       const span = 1 / steps.length
+      // 16×16 holds are enough to know a higher fps cannot fit. Skip its 512px
+      // extract and muxes, and try the next rate. The last rate still encodes:
+      // the byte model overestimates flat animation.
+      const heldGuess = await probeHoldCount(
+        inputPath, start, srcSpan, outFps, `${cropF}setpts=PTS/${speed}`, tmp,
+      )
+      if (skipFpsBeforeMux(heldGuess, outFps, isLast)) {
+        progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
+        tier++
+        continue
+      }
+
       await rm(framesDir, { recursive: true, force: true })
       await mkdir(framesDir, { recursive: true })
       progress?.(base, `Extracting ${Math.round(outFps)}fps frames`)
@@ -287,6 +331,7 @@ export async function convertToAnimatedWebp(
       // is what carries the size projection across to the cheapest rung.
       const frameRatio = lastHeld.length / frames.length
       const samples: SizeSample[] = []
+      let nextFps = false
       for (const [n, q] of ladder.entries()) {
         progress?.(base + span * (0.65 + 0.35 * (n / ladder.length)), `Muxing q${q}`)
         await muxImg2Webp(lastHeld, outPath, q)
@@ -296,11 +341,15 @@ export async function convertToAnimatedWebp(
         samples.push({ q, bytes: size })
         // Eight full muxes of a clip that could never fit is minutes of a 1 GB VM
         // doing nothing useful. Two points give the quality curve; if its lowest rung
-        // still misses, stop now and say so.
+        // still misses, stop this fps. A lower rate may still fit; only the last
+        // rate fails the encode.
         if (projectedNeverFits(samples, frameRatio, lowestQ, WEBP_TARGET)) {
-          throw new WebpBudgetError(size, outDur, outFps, q)
+          if (isLast) throw new WebpBudgetError(size, outDur, outFps, q)
+          nextFps = true
+          break
         }
       }
+      if (nextFps) progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
       tier++
     }
     throw new WebpBudgetError(lastSize, outDur, lastFps, lowestQ)

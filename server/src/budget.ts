@@ -53,6 +53,30 @@ export function maxSecondsForMotion(fps: number): number {
   return 0.3
 }
 
+/** Where the trim opens: the whole clip, capped at 6s and at what this fps can fit. */
+export function openingTrimEnd(durationSec: number, sourceFps: number): number {
+  const duration = Math.max(0, durationSec)
+  const keep = maxSecondsForMotion(capFps(sourceFps))
+  return Math.min(duration, MAX_STICKER_SEC, keep)
+}
+
+/**
+ * A higher fps whose held frames already miss the byte budget is not worth muxing.
+ * The last fps still muxes: the estimate is pessimistic for flat animation.
+ */
+export function skipFpsBeforeMux(heldFrames: number, fps: number, isLast: boolean): boolean {
+  if (isLast || heldFrames <= 0 || fps <= 0) return false
+  return estimatedBytes(heldFrames / fps, fps) > WEBP_TARGET
+}
+
+/** Longest opening span: the probed window when its holds fit, otherwise the safe trim. */
+export function fitSpanSeconds(durationSec: number, sourceFps: number, heldFrames: number): number {
+  const fps = capFps(sourceFps)
+  const window = Math.min(Math.max(0, durationSec), MAX_STICKER_SEC)
+  if (heldFrames > 0 && fps > 0 && estimatedBytes(heldFrames / fps, fps) <= WEBP_TARGET) return window
+  return openingTrimEnd(durationSec, sourceFps)
+}
+
 export function motionBudget(durationSec: number, sourceFps: number): {
   fps: number
   ok: boolean
