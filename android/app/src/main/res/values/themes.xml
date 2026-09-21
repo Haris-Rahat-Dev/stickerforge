@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <style name="Theme.StickerForge" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/sf_green</item>
+        <item name="colorPrimaryVariant">@color/sf_teal</item>
+        <item name="colorOnPrimary">@color/sf_green_ink</item>
+        <item name="colorSecondary">@color/sf_teal</item>
+        <item name="colorOnSecondary">@color/sf_ink</item>
+        <item name="colorSurface">@color/sf_panel</item>
+        <item name="colorOnSurface">@color/sf_ink</item>
+        <item name="colorError">@color/sf_red</item>
+
+        <item name="android:colorBackground">@color/sf_bg</item>
+        <item name="android:windowBackground">@drawable/bg_app</item>
+        <item name="android:textColorPrimary">@color/sf_ink</item>
+        <item name="android:textColorSecondary">@color/sf_muted</item>
+        <item name="android:textColorHint">@color/sf_muted_dim</item>
+        <item name="android:statusBarColor">@color/sf_bg</item>
+        <item name="android:navigationBarColor">@color/sf_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
+        <item name="android:editTextColor">@color/sf_ink</item>
+        <item name="android:textColorLink">@color/sf_green</item>
+        <item name="colorControlActivated">@color/sf_green</item>
+        <item name="colorControlNormal">@color/sf_line_hot</item>
+        <item name="colorControlHighlight">@color/sf_green_tint</item>
+    </style>
+
+    <!-- ── type ────────────────────────────────────────────────────────── -->
+    <style name="Text.StickerForge" parent="">
+        <item name="android:textColor">@color/sf_ink</item>
+    </style>
+
+    <style name="Text.StickerForge.Display">
+        <item name="android:fontFamily">@font/anton</item>
+        <item name="android:textSize">26sp</item>
+        <item name="android:letterSpacing">0.03</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+    <style name="Text.StickerForge.Section">
+        <item name="android:fontFamily">@font/anton</item>
+        <item name="android:textSize">17sp</item>
+        <item name="android:letterSpacing">0.04</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+    <style name="Text.StickerForge.Label">
+        <item name="android:fontFamily">@font/plex_mono_semi_bold</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:letterSpacing">0.14</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:textColor">@color/sf_muted</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+    <style name="Text.StickerForge.Mono">
+        <item name="android:fontFamily">@font/plex_mono</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:letterSpacing">0.02</item>
+        <item name="android:textColor">@color/sf_muted</item>
+    </style>
+
+    <style name="Text.StickerForge.Body">
+        <item name="android:fontFamily">@font/archivo_regular</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:lineSpacingExtra">3sp</item>
+    </style>
+
+    <style name="Widget.StickerForge.Button" parent="">
+        <item name="android:fontFamily">@font/archivo_bold</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:letterSpacing">0.05</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:background">@drawable/btn_ghost</item>
+    </style>
+
+    <!-- ── chrome ──────────────────────────────────────────────────────── -->
+    <style name="Chip.StickerForge" parent="">
+        <item name="android:fontFamily">@font/plex_mono_semi_bold</item>
+        <item name="android:textSize">10.5sp</item>
+        <item name="android:letterSpacing">0.08</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:paddingStart">9dp</item>
+        <item name="android:paddingEnd">9dp</item>
+        <item name="android:paddingTop">4dp</item>
+        <item name="android:paddingBottom">4dp</item>
+        <item name="android:background">@drawable/chip_diecut</item>
+        <item name="android:textColor">@color/sf_muted</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+</resources>

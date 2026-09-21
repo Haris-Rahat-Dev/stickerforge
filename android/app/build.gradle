@@ -24,3 +24,10 @@ android {
 java {
     toolchain { languageVersion = JavaLanguageVersion.of(17) }
 }
+
+dependencies {
+    // The screen a real user looks at; the ContentProvider contract stays dependency-free.
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'com.google.android.material:material:1.11.0'
+}

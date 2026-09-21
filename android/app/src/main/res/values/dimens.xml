@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="pad_screen">18dp</dimen>
+    <dimen name="pad_card">16dp</dimen>
+    <!-- cards carry a hard offset shadow, so their far padding absorbs it -->
+    <dimen name="pad_card_end">20dp</dimen>
+    <dimen name="gap_card">12dp</dimen>
+    <dimen name="radius_card">14dp</dimen>
+    <dimen name="radius_tile">10dp</dimen>
+    <dimen name="radius_pill">7dp</dimen>
+    <dimen name="stamp_offset">4dp</dimen>
+    <dimen name="stamp_offset_sm">3dp</dimen>
+    <dimen name="logo_size">44dp</dimen>
+    <dimen name="tray_size">56dp</dimen>
+    <dimen name="reg_mark_size">14dp</dimen>
+    <integer name="grid_cols">3</integer>
+</resources>

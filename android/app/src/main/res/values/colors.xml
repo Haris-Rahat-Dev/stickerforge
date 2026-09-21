@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- StickerForge tokens — same values as web/src/styles.css :root -->
+    <color name="sf_bg">#FF0D0F0B</color>
+    <color name="sf_panel">#FF151810</color>
+    <color name="sf_panel_2">#FF1C2015</color>
+    <color name="sf_line">#FF2B3122</color>
+    <color name="sf_line_hot">#FF3D4530</color>
+    <color name="sf_ink">#FFEFEFDF</color>
+    <color name="sf_muted">#FF99A089</color>
+    <color name="sf_green">#FF2FE06C</color>
+    <color name="sf_green_ink">#FF0A2912</color>
+    <color name="sf_teal">#FF128C7E</color>
+    <color name="sf_amber">#FFFFB224</color>
+    <color name="sf_red">#FFFF5D45</color>
+    <color name="sf_chat">#FFE8E0CE</color>
+
+    <!-- hard stamp shadow: rgba(0,0,0,.85) -->
+    <color name="sf_shadow">#D9000000</color>
+
+    <color name="sf_green_tint">#1F2FE06C</color>
+    <color name="sf_green_line">#732FE06C</color>
+    <color name="sf_amber_tint">#1AFFB224</color>
+    <color name="sf_amber_line">#66FFB224</color>
+    <color name="sf_muted_dim">#8099A089</color>
+    <color name="sf_chat_frame">#FFB9B29F</color>
+</resources>

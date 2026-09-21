@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.stickerforge.app.SquareTile xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/slotTile"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_margin="5dp"
+    android:background="@drawable/bg_tile_empty">
+
+    <ImageView
+        android:id="@+id/slotThumb"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginEnd="@dimen/stamp_offset_sm"
+        android:layout_marginBottom="@dimen/stamp_offset_sm"
+        android:contentDescription="@null"
+        android:padding="7dp"
+        android:scaleType="fitCenter" />
+
+    <TextView
+        android:id="@+id/slotIndex"
+        style="@style/Text.StickerForge.Mono"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="8dp"
+        android:layout_marginTop="6dp"
+        android:fontFamily="@font/plex_mono_semi_bold"
+        android:includeFontPadding="false"
+        android:textColor="@color/sf_muted_dim"
+        android:textSize="10sp" />
+
+    <TextView
+        android:id="@+id/slotEmoji"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="11dp"
+        android:ellipsize="end"
+        android:includeFontPadding="false"
+        android:maxLines="1"
+        android:shadowColor="@color/sf_shadow"
+        android:shadowDx="1"
+        android:shadowDy="1"
+        android:shadowRadius="0.5"
+        android:textColor="@color/sf_green_ink"
+        android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/slotState"
+        style="@style/Text.StickerForge.Label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:textSize="10sp"
+        android:visibility="gone" />
+
+    <ProgressBar
+        android:id="@+id/slotBar"
+        style="@android:style/Widget.ProgressBar.Horizontal"
+        android:layout_width="match_parent"
+        android:layout_height="5dp"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="@dimen/stamp_offset_sm"
+        android:layout_marginEnd="@dimen/stamp_offset_sm"
+        android:layout_marginBottom="4dp"
+        android:max="100"
+        android:progressDrawable="@drawable/progress_stamp"
+        android:visibility="gone" />
+</com.stickerforge.app.SquareTile>

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StickerForge</string>
+
+    <!-- brand strip -->
+    <string name="brand_title">StickerForge</string>
+    <string name="brand_tagline">Pack importer · die-cut video stickers</string>
+    <string name="spec_format">Animated WebP</string>
+    <string name="spec_count">Min 3</string>
+
+    <!-- pack code block -->
+    <string name="code_label">Pack code</string>
+    <string name="code_hint">kb7x29</string>
+    <string name="code_helper">Scan the QR on the build screen, or type the code printed under it.</string>
+    <string name="code_missing">Type a pack code first — it is shown under the QR on the build screen.</string>
+    <string name="host_line">Pulling from %1$s</string>
+    <string name="load_action">Load pack</string>
+    <string name="reload_action">Load again</string>
+    <string name="cancel_action">Cancel</string>
+
+    <!-- status -->
+    <string name="status_empty">Nothing loaded yet. Enter a pack code and pull it down.</string>
+    <string name="status_connecting">Reaching the StickerForge server…</string>
+    <string name="status_fetching">Fetching files</string>
+    <string name="status_fetching_file">Fetching %1$s</string>
+    <string name="status_file_count">%1$d of %2$d done</string>
+    <string name="status_ready">%1$d animated stickers ready. Add them to WhatsApp below.</string>
+    <string name="status_cancelled">Load cancelled. Nothing was changed on this device.</string>
+    <string name="status_checking_whatsapp">Checking with WhatsApp…</string>
+
+    <!-- errors -->
+    <string name="error_title">Couldn\'t load that pack</string>
+    <string name="error_unreachable">Can\'t reach %1$s. Make sure this device is on the same private network as your StickerForge host and that the server is running.</string>
+    <string name="error_timeout">%1$s took too long to answer. Check the host is still up, then try again.</string>
+    <string name="error_not_found">No built pack called %1$s on this host. Build it in StickerForge first, or re-check the code.</string>
+    <string name="error_server">The StickerForge server answered with %1$s. Try again, or rebuild the pack.</string>
+    <string name="error_manifest">The manifest this host returned isn\'t a pack the importer can read. Rebuild the pack in StickerForge.</string>
+    <string name="error_too_few">WhatsApp needs at least 3 stickers — this pack has %1$d. Add more and rebuild.</string>
+    <string name="error_write">Couldn\'t save the pack on this device. Check there is free space, then try again.</string>
+    <string name="error_file">One or more files came back incomplete. Try again.</string>
+    <string name="error_unknown">Something went wrong while loading. Try again.</string>
+    <string name="retry_action">Try again</string>
+
+    <!-- pack header -->
+    <string name="pack_meta_line">%1$d animated stickers · by %2$s · v%3$s</string>
+    <string name="pack_code_meta">code %1$s</string>
+
+    <!-- grid -->
+    <string name="grid_label">Stickers in this pack</string>
+    <string name="grid_count">%1$d / %2$d ready</string>
+    <string name="slot_queued">Queued</string>
+    <string name="slot_downloading">fetching</string>
+    <string name="slot_ready">on device</string>
+    <string name="not_measured">not on disk</string>
+    <string name="slot_detail">%1$s · %2$s · %3$s</string>
+    <string name="slot_failed">Tap to retry</string>
+    <string name="slot_percent">%1$d%%</string>
+    <string name="slot_index">%02d</string>
+    <string name="animation_note">On this Android version thumbnails show their first frame. WhatsApp plays the full animation either way.</string>
+
+    <!-- add to whatsapp -->
+    <string name="add_action">Add to WhatsApp</string>
+    <string name="add_reason_loaded">The pack is on this device — one tap sends it to WhatsApp.</string>
+    <string name="add_reason_missing">Load a pack to unlock this.</string>
+    <string name="add_reason_loading">Hold on — the pack is still coming down.</string>
+    <string name="add_reason_failed">The last load failed. Fix it above, then this unlocks.</string>
+    <string name="add_reason_no_whatsapp">WhatsApp isn\'t installed on this device.</string>
+    <string name="whatsapp_approved">Approved by WhatsApp</string>
+    <string name="whatsapp_pending">Waiting on WhatsApp approval</string>
+    <string name="whatsapp_unknown">WhatsApp status unknown</string>
+
+    <!-- add to whatsapp results -->
+    <string name="result_added">Pack added. Open any chat → sticker tray to use it.</string>
+    <string name="result_rejected">WhatsApp didn\'t confirm the pack. It usually means this app isn\'t whitelisted yet.</string>
+    <string name="result_cancelled">Closed without adding. The pack stays ready — tap again anytime.</string>
+    <string name="result_no_whatsapp">No WhatsApp install found on this device.</string>
+
+    <!-- accessibility -->
+    <string name="cd_logo">StickerForge</string>
+    <string name="cd_tray">Pack tray icon</string>
+    <string name="cd_sticker">Sticker %1$d of %2$d</string>
+</resources>
