@@ -77,6 +77,39 @@ export function fitSpanSeconds(durationSec: number, sourceFps: number, heldFrame
   return openingTrimEnd(durationSec, sourceFps)
 }
 
+/**
+ * One real keyframe plus the per-frame cost of a short mux, scaled to the held
+ * frame count. The flat 4KB model is optimistic on detailed footage.
+ */
+export function projectAnimatedBytes(
+  keyBytes: number,
+  sampleBytes: number,
+  sampleFrames: number,
+  heldFrames: number,
+): number {
+  const held = Math.max(1, heldFrames)
+  if (sampleFrames <= 1 || keyBytes <= 0) return Math.max(0, Math.round(Math.max(keyBytes, sampleBytes)))
+  const delta = Math.max(0, (sampleBytes - keyBytes) / (sampleFrames - 1))
+  return Math.round(keyBytes + (held - 1) * delta)
+}
+
+/** Shrink a span in proportion to how far its projected size misses the cap. */
+export function secondsThatFit(spanSec: number, projectedBytes: number, target = WEBP_TARGET): number {
+  if (projectedBytes <= target || projectedBytes <= 0) return spanSec
+  const scaled = spanSec * (target / projectedBytes)
+  return Math.min(MAX_STICKER_SEC, Math.max(0.5, Math.floor(scaled * 10) / 10))
+}
+
+/**
+ * One mux is already so far over the cap that even a squared quality drop to the
+ * cheapest rung misses. Stops the ladder before q80 and q70 on detailed footage.
+ */
+export function firstMuxNeverFits(bytes: number, q: number, lowestQ: number, target: number): boolean {
+  if (bytes <= target || q <= 0) return false
+  if (q <= lowestQ) return true
+  return bytes * (lowestQ / q) ** 2 > target
+}
+
 export function motionBudget(durationSec: number, sourceFps: number): {
   fps: number
   ok: boolean

@@ -6,9 +6,9 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
-import { extractTray } from './convert.js'
-import { convertToAnimatedWebp, imageToAnimatedWebp, probeHoldCount, type WebpResult } from './webp.js'
-import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd } from './budget.js'
+import { extractTray, buildFilters } from './convert.js'
+import { convertToAnimatedWebp, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, type WebpResult } from './webp.js'
+import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd, secondsThatFit } from './budget.js'
 import { createLimiter } from './queue.js'
 import { reapOrphans } from './reap.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
@@ -322,19 +322,26 @@ app.get('/api/cropdetect/:id', ah(async (req, res) => {
   res.json(rec.suggestedCrop)
 }))
 
-// One 16×16 pass over the first 6s. If the holds fit, the editor keeps that
-// window; otherwise it stays on the safe all-motion trim.
+// One 16×16 pass, then eight real frames. If those already miss 500KB, the
+// trim that opens is the shorter one — not the optimistic 4KB-per-frame guess.
 app.get('/api/fit-span/:id', ah(async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   const fallback = openingTrimEnd(rec.meta.duration, rec.meta.fps)
   if (rec.kind === 'image') { res.json({ seconds: rec.meta.duration }); return }
   const fps = capFps(rec.meta.fps)
-  const span = Math.max(0.1, Math.min(rec.meta.duration, MAX_STICKER_SEC))
+  const window = Math.max(0.1, Math.min(rec.meta.duration, MAX_STICKER_SEC))
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-span-'))
   try {
-    const held = await probeHoldCount(rec.path, 0, span, fps, '', tmp)
-    res.json({ seconds: fitSpanSeconds(rec.meta.duration, rec.meta.fps, held) })
+    const held = await probeHoldCount(rec.path, 0, window, fps, '', tmp)
+    let seconds = fitSpanSeconds(rec.meta.duration, rec.meta.fps, held)
+    const span = Math.max(0.1, Math.min(seconds, rec.meta.duration))
+    const heldSpan = span + 0.05 >= window ? held : await probeHoldCount(rec.path, 0, span, fps, '', tmp)
+    const projected = await measureSpanBytes(
+      rec.path, 0, span, fps, buildFilters('contain'), heldSpan, tmp,
+    )
+    if (projected != null) seconds = secondsThatFit(span, projected)
+    res.json({ seconds })
   } catch {
     res.json({ seconds: fallback })
   } finally {

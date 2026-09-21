@@ -77,7 +77,7 @@ export default function Editor({
     let dead = false
     fitSpan(file.id).then(seconds => {
       if (dead || seconds == null) return
-      setEnd(prev => trimTouched.current ? prev : Math.max(prev, Math.min(duration, seconds)))
+      setEnd(prev => trimTouched.current || seconds == null ? prev : Math.min(duration, Math.max(0.5, seconds)))
     }).finally(() => { if (!dead) setFitting(false) })
     return () => { dead = true }
   }, [file.id, isImage, duration])

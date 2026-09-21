@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { buildFilters } from './convert.js'
-import { fpsSteps, planSpan, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
+import { firstMuxNeverFits, fpsSteps, planSpan, projectAnimatedBytes, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
 import type { ConvertSettings } from './types.js'
 
 export type WebpOptions = Omit<ConvertSettings, 'speed'> & {
@@ -219,6 +219,46 @@ export async function probeHoldCount(
   return collapseHolds(sigs, Math.max(8, Math.round(1000 / fps))).length
 }
 
+/**
+ * Eight real frames, muxed at the cheapest quality, scaled to the held count.
+ * Returns null when the sample cannot be built — the caller encodes anyway.
+ * This is the check the flat byte model cannot make: detailed footage overruns it.
+ */
+export async function measureSpanBytes(
+  inputPath: string,
+  start: number,
+  srcSpan: number,
+  fps: number,
+  preVf: string,
+  heldFrames: number,
+  tmp: string,
+): Promise<number | null> {
+  if (heldFrames <= 1 || fps <= 0) return null
+  const dir = path.join(tmp, `sample-${Math.round(fps * 100)}`)
+  await rm(dir, { recursive: true, force: true })
+  await mkdir(dir, { recursive: true })
+  const every = Math.max(1, Math.round(Math.max(srcSpan, 0.1) * fps / 8))
+  const vf = [preVf, `fps=${fps}`, `select=not(mod(n\\,${every}))`].filter(Boolean).join(',')
+  try {
+    await run('ffmpeg', [
+      '-ss', String(start), '-t', String(srcSpan), '-i', inputPath,
+      '-vf', vf, '-frames:v', '8', '-y', path.join(dir, 'f%04d.png'),
+    ])
+    const names = (await readdir(dir)).filter(f => f.endsWith('.png')).sort()
+    if (names.length < 2) return null
+    const paths = names.map(f => path.join(dir, f))
+    const keyPath = path.join(dir, 'key.webp')
+    await run('cwebp', [paths[0], '-q', '50', '-m', '4', '-quiet', '-o', keyPath])
+    const keyBytes = (await stat(keyPath)).size
+    const samplePath = path.join(dir, 'sample.webp')
+    const frameMs = Math.max(8, Math.round(1000 / fps))
+    await muxImg2Webp(paths.map(p => ({ path: p, durationMs: frameMs })), samplePath, 50)
+    return projectAnimatedBytes(keyBytes, (await stat(samplePath)).size, paths.length, heldFrames)
+  } catch {
+    return null
+  }
+}
+
 async function holdItems(framesDir: string, frames: string[], frameMs: number, tmp: string): Promise<HeldFrame[]> {
   const sigs = await frameSignatures(framesDir, frames.length, tmp)
   // If the signatures don't line up one-for-one, extract no holds rather than
@@ -306,6 +346,19 @@ export async function convertToAnimatedWebp(
         continue
       }
 
+      // A few real frames at q50. The 4KB model said 5.1s would fit and this
+      // footage came out at 1007KB — find that out before extracting every frame.
+      progress?.(base, 'Checking size')
+      const projected = await measureSpanBytes(
+        inputPath, start, srcSpan, outFps, `${cropF}${filters},setpts=PTS/${speed}`, heldGuess, tmp,
+      )
+      if (projected != null && projected > WEBP_TARGET) {
+        if (isLast) throw new WebpBudgetError(projected, outDur, outFps, lowestQ)
+        progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
+        tier++
+        continue
+      }
+
       await rm(framesDir, { recursive: true, force: true })
       await mkdir(framesDir, { recursive: true })
       progress?.(base, `Extracting ${Math.round(outFps)}fps frames`)
@@ -339,6 +392,11 @@ export async function convertToAnimatedWebp(
         lastSize = size
         if (size <= WEBP_TARGET) return await verify(outPath, lastHeld[0]?.path ?? null, tmp)
         samples.push({ q, bytes: size })
+        if (samples.length === 1 && firstMuxNeverFits(size, q, lowestQ, WEBP_TARGET)) {
+          if (isLast) throw new WebpBudgetError(size, outDur, outFps, q)
+          nextFps = true
+          break
+        }
         // Eight full muxes of a clip that could never fit is minutes of a 1 GB VM
         // doing nothing useful. Two points give the quality curve; if its lowest rung
         // still misses, stop this fps. A lower rate may still fit; only the last

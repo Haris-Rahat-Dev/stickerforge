@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { capFps, fitSpanSeconds, fpsSteps, maxSecondsForMotion, motionBudget, openingTrimEnd, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET } from '../src/budget.ts'
+import { capFps, firstMuxNeverFits, fitSpanSeconds, fpsSteps, maxSecondsForMotion, motionBudget, openingTrimEnd, projectAnimatedBytes, projectedNeverFits, secondsThatFit, skipFpsBeforeMux, WEBP_TARGET } from '../src/budget.ts'
 
 test('fps ladder keeps 30 then 24, never the old 8fps dump', () => {
   assert.deepEqual(fpsSteps(30), [30, 24])
@@ -49,6 +49,21 @@ test('fit span keeps the probed window when holds fit', () => {
   assert.equal(fitSpanSeconds(8, 30, 40), 6)
   assert.equal(fitSpanSeconds(5, 15, 70), 5)
   assert.equal(fitSpanSeconds(10, 30, 180), 4.1)
+})
+
+test('a short mux scales to the held frame count', () => {
+  // 25KB key + 4KB deltas. Eight frames stand in for 122.
+  assert.equal(projectAnimatedBytes(25_000, 25_000 + 7 * 4_000, 8, 122), 25_000 + 121 * 4_000)
+})
+
+test('a projected miss shortens the span instead of keeping the optimistic trim', () => {
+  assert.equal(secondsThatFit(5.1, 1007 * 1024), 2.4)
+  assert.equal(secondsThatFit(5.1, 400 * 1024), 5.1)
+})
+
+test('the first mux bails when a squared quality drop still misses', () => {
+  assert.equal(firstMuxNeverFits(2_000 * 1024, 90, 50, WEBP_TARGET), true)
+  assert.equal(firstMuxNeverFits(700 * 1024, 90, 50, WEBP_TARGET), false)
 })
 
 const KB = 1024
