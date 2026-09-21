@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
-import { convertToSticker, extractTray } from './convert.js'
+import { extractTray } from './convert.js'
 import { convertToAnimatedWebp, imageToAnimatedWebp, probeHoldCount, type WebpResult } from './webp.js'
 import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd } from './budget.js'
 import { createLimiter } from './queue.js'
@@ -344,9 +344,11 @@ app.get('/api/fit-span/:id', ah(async (req, res) => {
 
 function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null, controller?: AbortController): Job {
   const jobId = crypto.randomUUID()
-  // Videos: WebM for Sticker.ly, then img2webp cache for WhatsApp. Images skip VP9
-  // (libvpx can hang on a still) and write the motionless animated WebP directly.
-  const outputPath = path.join(OUTPUTS, `${jobId}.${rec.kind === 'image' ? 'webp' : 'webm'}`)
+  // WhatsApp ships the WebP. Images and videos both stop there — a following
+  // two-pass VP9 WebM was a second full encode the pack never reads.
+  const outputPath = rec.kind === 'image'
+    ? path.join(OUTPUTS, `${jobId}.webp`)
+    : webpCachePath(jobId)
   const job: Job = {
     id: jobId,
     owner: rec.owner,
@@ -376,30 +378,17 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
         // WhatsApp WebP from the original, not the VP9 WebM — a second lossy
         // generation was the pixelation. Settings apply once here.
         const webp = await convertToAnimatedWebp({
-          inputPath: rec.path, outPath: webpCachePath(jobId),
+          inputPath: rec.path, outPath: outputPath,
           start, end, speed, fps, fit, padColor, crop, cropPos, border,
         }, (p, stage) => {
-          // The WebP pass is the long one and used to report nothing at all.
-          job.progress = p * 0.45
+          job.progress = p
           job.stage = stage
           publishJob(job)
         })
         job.webpBytes = webp.sizeBytes
         job.webpFps = webp.fps
         job.spec = specOf(webp)
-        job.progress = 0.45
-        job.stage = 'encoding'
-        publishJob(job)
-        const webm = await convertToSticker(
-          { inputPath: rec.path, outputPath, start, end, speed, fps, fit, padColor, crop, cropPos, border },
-          signal,
-          p => {
-            job.progress = Math.min(0.99, 0.45 + p * 0.54)
-            job.stage = 'encoding'
-            publishJob(job)
-          }
-        )
-        return webm
+        return webp
       }
 
   job.stage = 'queued'
@@ -416,13 +405,13 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
       job.webpBytes = job.spec?.sizeBytes ?? result.sizeBytes
       job.webpFps = job.spec?.fps ?? 0
     }
-    job.outMeta = rec.kind === 'image' && job.spec
+    job.outMeta = job.spec
       ? {
         width: job.spec.width, height: job.spec.height, fps: job.spec.fps,
         duration: job.spec.duration, bitrate: 0, codec: 'webp',
         pixFmt: 'webp', hasAudio: false, sizeBytes: job.spec.sizeBytes,
       }
-      : await probeVideo(outputPath).catch(() => null)
+      : await probeVideo(job.outputPath).catch(() => null)
     jobAbort.delete(jobId)
     saveJob(job)   // only finished jobs are persisted — a running encode can't survive a restart
     publishJob(job)
@@ -496,7 +485,7 @@ app.post('/api/job/:id/cancel', (req, res) => {
 
 app.get('/api/download/webm/:jobId', (req, res) => {
   const job = ownedJob(req, req.params.jobId)
-  if (!job || !fs.existsSync(job.outputPath)) { res.status(404).json({ error: 'Not found' }); return }
+  if (!job?.outputPath.endsWith('.webm') || !fs.existsSync(job.outputPath)) { res.status(404).json({ error: 'Not found' }); return }
   const name = (files.get(job.fileId)?.originalName || 'sticker').replace(/\.[^.]+$/, '')
   res.download(job.outputPath, `${name}.webm`)
 })
@@ -511,7 +500,8 @@ app.get('/api/download/tray/:jobId', (req, res) => {
 app.get('/api/output/preview/:jobId', (req, res) => {
   const job = ownedJob(req, req.params.jobId)
   if (!job || !fs.existsSync(job.outputPath)) { res.status(404).json({ error: 'Not found' }); return }
-  streamFile(req, res, job.outputPath, job.kind === 'image' ? 'image/webp' : 'video/webm')
+  const mime = job.outputPath.endsWith('.webp') ? 'image/webp' : 'video/webm'
+  streamFile(req, res, job.outputPath, mime)
 })
 
 app.get('/api/output/webp/:jobId', (req, res) => {

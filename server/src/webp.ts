@@ -404,7 +404,9 @@ async function muxImg2Webp(frames: HeldFrame[], outPath: string, q: number): Pro
   for (;;) {
     const lines = IMG2WEBP_HEAD.filter(f => !img2webpSkip.has(f))
     for (const f of frames) {
-      lines.push('-d', String(f.durationMs), '-lossy', '-q', String(q), '-m', '6', f.path)
+      // -m 6 is libwebp's slowest effort. 4 is cwebp's default; the quality ladder
+      // still drops q if the file misses the size cap.
+      lines.push('-d', String(f.durationMs), '-lossy', '-q', String(q), '-m', '4', f.path)
     }
     lines.push('-o', outPath)
     await writeFile(list, lines.join('\n'))
