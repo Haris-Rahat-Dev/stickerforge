@@ -61,6 +61,20 @@ export interface ConvertRequest extends ConvertSettings {
 
 export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'
 
+/**
+ * Measured out of the encoded WebP by the server, not the settings we asked for.
+ * This is the only evidence the UI may present as "within WhatsApp limits".
+ */
+export interface StickerSpec {
+  width: number
+  height: number
+  frames: number
+  fps: number
+  duration: number
+  sizeBytes: number
+  ssim: number | null
+}
+
 export interface Job {
   id: string
   fileId: string
@@ -71,6 +85,7 @@ export interface Job {
   sizeBytes?: number
   webpBytes?: number
   webpFps?: number
+  spec?: StickerSpec
   outMeta?: VideoMeta | null
   trayPath?: string | null
   error?: string
@@ -95,5 +110,6 @@ export interface StickerView {
   sizeBytes?: number
   editable: boolean
   emojis: string[]
+  spec?: StickerSpec
 }
 

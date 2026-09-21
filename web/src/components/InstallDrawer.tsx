@@ -1,15 +1,19 @@
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 import type { PackManifest } from '../api.js'
+import type { StickerView } from '../types.js'
+import { PackVerdict } from './StickerSpec.jsx'
 
 export default function InstallDrawer({
   manifest,
+  stickers = [],
   building,
   buildProgress,
   onClose,
   onRebuild,
 }: {
   manifest: PackManifest & { code: string }
+  stickers?: StickerView[]
   building?: boolean
   buildProgress?: { progress: number; stage: string } | null
   onClose: () => void
@@ -46,6 +50,7 @@ export default function InstallDrawer({
               )}
             </div>
           )}        </div>
+        <PackVerdict stickers={stickers} />
         <div className="install-cols">
           <div className="qr-col">
             {qr ? <img className="qr" src={qr} alt="Scan to open on phone" /> : <div className="qr placeholder" />}

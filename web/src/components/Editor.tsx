@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, detectCrop, watchJob } from '../api.js'
+import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, cancelJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
 import { capFps, MAX_STICKER_SEC, motionBudget } from '../budget.js'
 import Timeline from './Timeline.jsx'
@@ -49,6 +49,9 @@ export default function Editor({
   const [job, setJob] = useState<Job | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const scrubbing = useRef(false)
+  const rangeRef = useRef({ start, end })
+  rangeRef.current = { start, end }
   const running = job?.status === 'running'
 
   useEffect(() => {
@@ -71,9 +74,12 @@ export default function Editor({
         onAddedToPack?.(jobId, j.sizeBytes, replaceAt)
       })
       .catch(err => {
+        const message = err instanceof Error ? err.message : 'failed'
+        // A cancel is a choice, not a fault — go back to idle instead of showing red.
+        if (message.toLowerCase().includes('cancel')) { setJob(null); setJobId(null); return }
         setJob({
           status: 'error',
-          error: err instanceof Error ? err.message : 'failed',
+          error: message,
           progress: 0, stage: '', id: jobId, fileId: file.id,
           settings: {} as ConvertRequest,
         })
@@ -83,14 +89,29 @@ export default function Editor({
   useEffect(() => {
     const v = videoRef.current
     if (!v || isImage) return
-    const onTick = () => {
-      if (v.currentTime >= end - 0.03 || v.currentTime < start - 0.4) v.currentTime = start
+    const onTick = (): void => {
+      if (scrubbing.current) return
+      const { start: s, end: e } = rangeRef.current
+      if (v.currentTime >= e - 0.03 || v.currentTime < s - 0.4) v.currentTime = s
     }
-    v.currentTime = start
+    v.currentTime = rangeRef.current.start
     v.play().catch(() => {})
     v.addEventListener('timeupdate', onTick)
     return () => v.removeEventListener('timeupdate', onTick)
-  }, [start, end, isImage])
+  }, [file.id, isImage])
+
+  const seekPreview = (t: number): void => {
+    const v = videoRef.current
+    if (!v) return
+    scrubbing.current = true
+    v.pause()
+    v.currentTime = t
+  }
+
+  const endScrub = (): void => {
+    scrubbing.current = false
+    videoRef.current?.play().catch(() => {})
+  }
 
   const outDur = end - start
   const budget = motionBudget(outDur, meta.fps)
@@ -160,27 +181,32 @@ export default function Editor({
                   <button className={`seg-btn ${pad ? 'active' : ''}`} onClick={() => setPad(true)}>Fit whole</button>
                 </div>
               )}
-              {!pad && (
-                <>
-                  <button className="btn btn-ghost btn-sm" disabled={cropDetecting} onClick={async () => {
-                    setCropDetecting(true)
-                    const c = await detectCrop(file.id).catch(() => null)
-                    setCrop(c ? squareInside(c) : squareCrop(meta.width, meta.height))
-                    setCropDetecting(false)
-                  }}>{cropDetecting ? 'Detecting…' : 'Auto black borders'}</button>
-                  <button className="btn btn-ghost btn-sm" onClick={() => setCrop(squareCrop(meta.width, meta.height))}>Reset crop</button>
-                </>
-              )}
+              <button className="btn btn-ghost btn-sm" disabled={pad || cropDetecting} onClick={async () => {
+                setCropDetecting(true)
+                const c = await detectCrop(file.id).catch(() => null)
+                setCrop(c ? squareInside(c) : squareCrop(meta.width, meta.height))
+                setCropDetecting(false)
+              }}>{cropDetecting ? 'Detecting…' : 'Auto black borders'}</button>
+              <button className="btn btn-ghost btn-sm" disabled={pad} onClick={() => setCrop(squareCrop(meta.width, meta.height))}>Reset crop</button>
               <button
                 className={`btn btn-ghost btn-sm ${border ? 'active' : ''}`}
                 onClick={() => setBorder(!border)}
                 title="Insets content so WhatsApp's rounded corners don't clip edge text"
-              >{border ? 'White border on' : 'White border'}</button>
+              >White border</button>
             </div>
 
             {!isImage && (
               <>
-                <Timeline duration={duration} start={start} end={end} stripUrl={stripUrl} maxSpan={maxSpan} onChange={setRange} />
+                <Timeline
+                  duration={duration}
+                  start={start}
+                  end={end}
+                  stripUrl={stripUrl}
+                  maxSpan={maxSpan}
+                  onChange={setRange}
+                  onScrub={seekPreview}
+                  onScrubEnd={endScrub}
+                />
                 <div className={`budget ${!budget.ok || budget.tight ? 'budget-over' : ''}`}>
                   {!budget.ok
                     ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s</span>
@@ -204,7 +230,10 @@ export default function Editor({
               {running ? `Encoding… ${Math.round((job?.progress || 0) * 100)}%` : 'Add to pack'}
             </button>
             {running && (
-              <div className="progress"><div className="progress-fill" style={{ width: `${Math.round((job?.progress || 0) * 100)}%` }} /></div>
+              <div className="encode-row">
+                <div className="progress slim"><div className="progress-fill" style={{ width: `${Math.round((job?.progress || 0) * 100)}%` }} /></div>
+                <button className="btn btn-ghost btn-sm" onClick={() => jobId && void cancelJob(jobId)}>Cancel</button>
+              </div>
             )}
             {job?.status === 'error' && <div className="error-box">{job.error}</div>}
           </div>

@@ -340,6 +340,7 @@ export default function App() {
       {state.installOpen && state.built && (
         <InstallDrawer
           manifest={state.built}
+          stickers={active?.stickers ?? []}
           building={state.building}
           buildProgress={state.buildProgress}
           onClose={() => dispatch({ type: 'closeInstall' })}

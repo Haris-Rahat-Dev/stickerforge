@@ -231,7 +231,7 @@ body::after {
   display: grid; place-items: center; padding: 24px;
 }
 .modal {
-  width: min(980px, 100%); max-height: 92vh; overflow-y: auto;
+  width: min(980px, 100%); max-height: 92vh; overflow-y: auto; scrollbar-gutter: stable;
   background: var(--panel); border: 1px solid var(--line-hot); border-radius: 18px;
   box-shadow: 10px 10px 0 rgba(0, 0, 0, 0.55);
 }
@@ -253,9 +253,9 @@ body::after {
   display: flex; flex-direction: column; gap: 10px;
 }
 
-.stage-outer { border-radius: 14px; }
+.stage-outer { border-radius: 14px; aspect-ratio: 1; }
 .stage {
-  position: relative; aspect-ratio: 1; background: #000;
+  position: relative; width: 100%; height: 100%; background: #000;
   border-radius: 12px; overflow: hidden;
   border: 1px solid var(--line);
 }
@@ -295,6 +295,7 @@ body::after {
 
 .stage-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .stage-tools .seg { flex: 1 1 12rem; }
+.stage-tools .btn { white-space: nowrap; }
 .budget {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
   margin-top: 10px; padding: 10px 12px; border-radius: 8px;
@@ -384,12 +385,12 @@ select {
 }
 .tl-strip-empty { background: repeating-linear-gradient(45deg, var(--panel-2), var(--panel-2) 8px, var(--panel) 8px, var(--panel) 16px); }
 .tl-dim {
-  position: absolute; top: 0; bottom: 0;
+  position: absolute; top: 0; bottom: 0; pointer-events: none;
   background: rgba(10, 12, 8, 0.72);
   backdrop-filter: grayscale(0.8);
 }
 .tl-window {
-  position: absolute; top: 0; bottom: 0; cursor: grab;
+  position: absolute; top: 0; bottom: 0; pointer-events: none; cursor: grab;
   border: 2.5px solid var(--green);
   border-radius: 6px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 0 18px rgba(47, 224, 108, 0.25);
@@ -398,7 +399,7 @@ select {
 .tl-window.tl-over { border-color: var(--amber); }
 .tl-handle {
   position: absolute; top: -2px; bottom: -2px; width: 16px;
-  background: var(--green); cursor: ew-resize;
+  background: var(--green); cursor: ew-resize; pointer-events: none;
   display: grid; place-items: center;
 }
 .tl-handle-left { left: -2px; border-radius: 5px 0 0 5px; }
@@ -612,18 +613,257 @@ select {
 }
 .drawer-close { position: absolute; top: 18px; right: 18px; opacity: 1; }
 .search {
-  flex: 1; max-width: 420px; padding: 8px 12px;
+  display: block; flex: 1 1 auto; min-width: 0; width: 100%; max-width: 420px;
+  min-height: 44px; padding: 9px 12px 9px 32px;
   font-family: var(--font-mono); font-size: 12.5px;
-  background: transparent; color: inherit;
-  border: 2px solid var(--line, #2b3122); border-radius: 0;
-}
-.search:focus { outline: none; border-color: var(--green); }
-.emoji-picker { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-.emoji-opt {
-  font-size: 18px; line-height: 1; padding: 4px 6px; cursor: pointer;
-  background: transparent; border: 1px solid var(--line, #2b3122);
+  /* The magnifier's stroke is --muted as a literal: a data URI cannot read custom props. */
+  background: var(--panel-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 13 13'%3E%3Ccircle cx='5.4' cy='5.4' r='4' fill='none' stroke='%2399a089' stroke-width='1.6'/%3E%3Cpath d='M8.4 8.4 11.6 11.6' stroke='%2399a089' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat 11px center;
   color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.14s, box-shadow 0.08s, filter 0.1s;
 }
-.emoji-opt:hover { background: rgba(255, 255, 255, 0.08); }
+.search::placeholder { color: var(--muted); opacity: 1; }
+.search:hover { border-color: var(--line-hot); }
+.search:focus { border-color: var(--green); }
+.drawer .search { max-width: none; margin: 16px 0 18px; }
+.emoji-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.emoji-opt {
+  display: grid; place-items: center;
+  aspect-ratio: 1; min-width: 36px; min-height: 36px; padding: 0;
+  font-size: 19px; line-height: 1; cursor: pointer;
+  background: var(--panel-2); color: var(--ink);
+  border: 1px solid var(--line-hot); border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.08s, box-shadow 0.08s, filter 0.1s, border-color 0.12s;
+}
+.emoji-opt:hover { filter: brightness(1.2); border-color: var(--green); }
+.emoji-opt:active { transform: translate(3px, 3px); box-shadow: 0 0 0 rgba(0, 0, 0, 0.85); }
+.emoji-opt[aria-current='true'] {
+  border-color: var(--green); background: rgba(47, 224, 108, 0.14);
+  box-shadow: inset 0 0 0 1px var(--green), var(--shadow-sm);
+}
 
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+   VERIFIED SPEC — figures measured out of the encoded WebP, never requested
+   ══════════════════════════════════════════════════════════════════════════ */
+.spec-badge {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 6px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.spec-badge::before {
+  content: ''; width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto;
+  transform: rotate(45deg); background: currentColor;
+}
+.spec-badge.spec-ok::before   { background: var(--green); }
+.spec-badge.spec-warn::before { background: var(--amber); }
+.spec-badge.spec-bad::before  { background: var(--red); }
+.spec-badge.spec-warn { color: var(--amber); }
+.spec-badge.spec-bad  { color: var(--red); }
+
+.spec-list {
+  list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 1px; margin: 14px 0 4px; background: var(--line);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+}
+.spec-list li {
+  display: flex; flex-direction: column; gap: 2px; padding: 9px 11px;
+  background: var(--panel);
+}
+.spec-k {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted);
+}
+.spec-v { font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; }
+.spec-list li.spec-ok   .spec-v { color: var(--green); }
+.spec-list li.spec-warn .spec-v { color: var(--amber); }
+.spec-list li.spec-bad  .spec-v { color: var(--red); }
+
+.pack-verdict {
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.03em;
+  margin: 12px 0 2px; padding: 9px 12px; border-radius: 8px;
+  background: var(--panel-2); border-left: 3px solid var(--line-hot); color: var(--muted);
+}
+.pack-verdict b { color: var(--ink); font-weight: 600; }
+.pack-verdict.spec-ok   { border-left-color: var(--green); }
+.pack-verdict.spec-warn { border-left-color: var(--amber); }
+.pack-verdict.spec-bad  { border-left-color: var(--red); }
+.spec-unknown { color: var(--amber); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   MOTION — the stamp-press grammar. Physical, short, never decorative-only.
+   ══════════════════════════════════════════════════════════════════════════ */
+@keyframes sf-press-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+/* Die-cut: the card is cut out of the sheet it was printed on. */
+@keyframes sf-diecut {
+  from { opacity: 0; clip-path: inset(0 100% 100% 0 round 14px); transform: rotate(-0.6deg); }
+  to   { opacity: 1; clip-path: inset(0 0 0 0 round 14px); transform: none; }
+}
+@keyframes sf-slide-in-right { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes sf-fade { from { opacity: 0; } to { opacity: 1; } }
+/* The forge: heat sweeps the bed while the press is down. */
+@keyframes sf-heat {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@keyframes sf-clamp {
+  0%, 100% { transform: translateY(0); }
+  45%      { transform: translateY(4px); }
+}
+
+.modal, .drawer { animation: sf-press-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.modal-backdrop, .drawer-scrim { animation: sf-fade 0.18s ease both; }
+.drawer { animation: sf-slide-in-right 0.26s cubic-bezier(0.2, 0.85, 0.25, 1) both; }
+
+.grid > .card, .shelf-rail > .shelf-card {
+  animation: sf-diecut 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+/* Staggered so a sheet reads as cut tile by tile rather than all at once. */
+.grid > .card:nth-child(1)  { animation-delay: 0.00s; }
+.grid > .card:nth-child(2)  { animation-delay: 0.03s; }
+.grid > .card:nth-child(3)  { animation-delay: 0.06s; }
+.grid > .card:nth-child(4)  { animation-delay: 0.09s; }
+.grid > .card:nth-child(5)  { animation-delay: 0.12s; }
+.grid > .card:nth-child(6)  { animation-delay: 0.15s; }
+.grid > .card:nth-child(n+7) { animation-delay: 0.18s; }
+
+.progress-fill {
+  background-image: repeating-linear-gradient(45deg, var(--green) 0 8px, var(--teal) 8px 16px);
+  background-size: 200% 100%;
+  animation: sf-heat 1.1s linear infinite;
+}
+.pack-build-fill {
+  background-image: repeating-linear-gradient(45deg, var(--green) 0 8px, var(--teal) 8px 16px);
+  background-size: 200% 100%;
+  animation: sf-heat 1.1s linear infinite;
+}
+/* The press holds down while the encode runs. */
+.convert-btn:disabled { animation: sf-clamp 1.4s ease-in-out infinite; }
+.sticker-tile.dragging { opacity: 0.35; }
+.sticker-tile { transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1); }
+
+/* ── focus: the stamp has to show which tile is live under keyboard ───────── */
+:focus-visible {
+  outline: 2px solid var(--green); outline-offset: 3px; border-radius: 4px;
+}
+.search:focus { outline: 2px solid var(--green); outline-offset: 2px; }
+::selection { background: var(--green); color: var(--green-ink); }
+
+/* ── touch: a control you cannot see is not there ────────────────────────── */
+@media (hover: none) and (pointer: coarse) {
+  .remove { opacity: 1; background: rgba(13, 15, 11, 0.86); }
+  .btn, .seg-btn, .icon-btn, .emoji-opt, .crop-handle { min-height: 44px; min-width: 44px; }
+  .crop-handle { width: 26px; height: 26px; }
+  .card:hover { transform: none; box-shadow: var(--shadow-sm); }
+  .empty-box:hover { transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+    scroll-behavior: auto !important;
+  }
+  .card:hover { transform: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE — the phone reaches this UI over Tailscale, so it is a client
+   ══════════════════════════════════════════════════════════════════════════ */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .pack-bar { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  .app { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 900px) {
+  .editor-body { grid-template-columns: 1fr; }
+  .controls-col { border-left: 0; border-top: 1px solid var(--line); padding-top: 16px; }
+  .result { grid-template-columns: 1fr; }
+  .header { flex-wrap: wrap; gap: 12px; padding: 14px 18px; }
+  .spec-chips { order: 3; width: 100%; }
+  .modal { border-radius: 16px; }
+  .modal-backdrop { padding: 12px; align-items: flex-start; overflow-y: auto; }
+}
+
+@media (max-width: 680px) {
+  .content, .shelf, .sheet, .canvas-bar { padding-left: 14px; padding-right: 14px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 12px; }
+  .card-body { padding: 10px 11px 12px; }
+  .card-name { font-size: 12px; }
+  .meta-line { font-size: 10.5px; }
+  .brand h1 { font-size: 20px; }
+  .logo { width: 38px; height: 38px; font-size: 20px; }
+  .empty-box { padding: 44px 26px; }
+  .empty h2 { font-size: 30px; }
+  .drawer { width: 100%; padding: 20px 16px calc(20px + env(safe-area-inset-bottom)); }
+  .install-head { padding-right: 40px; }
+  .install-cols { gap: 20px; }
+  .qr-col { width: 100%; }
+  .qr { width: min(220px, 70vw); height: auto; aspect-ratio: 1; }
+  .sticker-row { gap: 10px; }
+  .sticker-cell { width: 88px; height: 88px; }
+
+  /* The build bar owns the bottom edge; upload rows stack above it instead of
+     sitting underneath it, which is what made both unreadable on a phone. */
+  .pack-bar { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
+  .pack-bar .btn-primary { margin-left: 0; width: 100%; }
+  .pack-build-progress { min-width: 0; width: 100%; }
+  .upload-tray {
+    left: 14px; right: 14px; min-width: 0;
+    bottom: calc(74px + env(safe-area-inset-bottom));
+    max-height: 40vh; overflow-y: auto;
+  }
+  .upload-name { max-width: none; flex: 1; }
+  .toolbar { flex-wrap: wrap; }
+  .search { max-width: none; width: 100%; order: 3; }
+  .tl-track { height: 46px; }
+  .stage-tools .btn { flex: 1 1 auto; }
+}
+
+/* Very small or zoomed: keep the two panes of the pack bar from overlapping. */
+@media (max-width: 420px) {
+  .spec-list { grid-template-columns: repeat(2, 1fr); }
+  .empty h2 { font-size: 25px; }
+  .grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+
+/* Encode row: the bar and the way out of a 90-second wait. */
+.encode-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.encode-row .progress { flex: 1; }
+/* ══════════════════════════════════════════════════════════════════════════
+   EMPTY STATES — the same die-cut tray, inline on a screen instead of full-bleed
+   ══════════════════════════════════════════════════════════════════════════ */
+.empty-state { display: grid; place-items: center; padding: 6px 0 22px; }
+.empty-state .empty-box { padding: 52px 60px; max-width: 620px; }
+.empty-state .empty-icon { font-size: 46px; margin-bottom: 14px; }
+.empty-state h2 {
+  font-family: var(--font-display); font-size: 28px; letter-spacing: 0.03em;
+  text-transform: uppercase; line-height: 1; margin-bottom: 10px;
+}
+.empty-state h2 em { color: var(--green); font-style: normal; }
+.empty-state p {
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7;
+  color: var(--muted); max-width: 44ch; margin: 0 auto 24px;
+}
+.empty-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.sheet-empty .empty-box { padding: 46px 54px; }
+
+@media (max-width: 680px) {
+  .empty-state { padding: 2px 0 16px; }
+  .empty-state .empty-box, .sheet-empty .empty-box { padding: 34px 20px; }
+  .empty-state h2 { font-size: 22px; }
+  .empty-state .empty-icon { font-size: 38px; }
+  .empty-state p { font-size: 11.5px; margin-bottom: 18px; }
+}
+
+/* :focus-visible squares off whatever it touches with a 4px radius; a stamp has to
+   keep the radius it was cut with, so the restyled controls re-assert theirs. */
+.search:focus-visible, .emoji-opt:focus-visible { border-radius: 8px; }

@@ -64,6 +64,8 @@ export default function PackCanvas(props: {
         onFineTune={props.onFineTune}
         onReplace={props.onReplace}
         onRemove={props.onRemove}
+        onAddMedia={props.onAddMedia}
+        onAddExisting={props.onAddExisting}
       />
 
       <div className="pack-bar">

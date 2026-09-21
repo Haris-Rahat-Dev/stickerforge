@@ -1,4 +1,4 @@
-import type { BatchJobInfo, ConvertRequest, CropRect, FileRecord, Job, StickerView } from './types.js'
+import type { BatchJobInfo, ConvertRequest, CropRect, FileRecord, Job, StickerSpec, StickerView } from './types.js'
 import { authHeader, tokenQuery, freshTokenQuery } from './auth.js'
 
 const BASE = ''
@@ -181,6 +181,11 @@ export async function getJob(jobId: string): Promise<Job> {
   return json
 }
 
+/** Stop a running encode and release its queue slot. */
+export async function cancelJob(jobId: string): Promise<void> {
+  await apiFetch(`${BASE}/api/job/${jobId}/cancel`, { method: 'POST' })
+}
+
 export function outputPreviewUrl(jobId: string): string {
   return `${BASE}/api/output/preview/${jobId}${tokenQuery()}`
 }
@@ -213,6 +218,8 @@ export interface JobEvent {
   stage: string
   sizeBytes?: number
   error?: string
+  /** Measured properties of the finished WebP; absent until the encode is verified. */
+  spec?: StickerSpec
 }
 
 export async function deleteSticker(jobId: string): Promise<void> {
@@ -273,6 +280,7 @@ async function pollJobUntilDone(jobId: string, on: (e: JobEvent) => void): Promi
       progress: j.progress,
       stage: j.stage,
       sizeBytes: j.webpBytes ?? j.sizeBytes,
+      spec: j.spec,
       error: j.error,
     }
     on(e)

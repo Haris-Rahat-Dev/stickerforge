@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import StickerPreview from './StickerPreview.jsx'
+import { SpecBadge } from './StickerSpec.jsx'
 import type { StickerView } from '../types.js'
 import { matchesQuery } from '../flow.js'
 
@@ -28,17 +29,43 @@ export default function StickerLibrary({
     <main className="content">
       <div className="toolbar">
         <button className="btn btn-ghost btn-sm" onClick={onBack}>← Packs</button>
-        <input
-          className="search"
-          placeholder="search stickers, emojis, packs…"
-          value={q}
-          onChange={e => setQ(e.target.value)}
-        />
-        <span className="switch-label">{shown.length} of {stickers.length}</span>
+        {stickers.length > 0 && (
+          <>
+            <input
+              className="search"
+              placeholder="search stickers, emojis, packs…"
+              value={q}
+              onChange={e => setQ(e.target.value)}
+            />
+            <span className="switch-label">{shown.length} of {stickers.length}</span>
+          </>
+        )}
       </div>
 
-      {shown.length === 0 && (
-        <div className="empty-box"><p>no stickers match “{q}”</p></div>
+      {stickers.length === 0 && (
+        <div className="empty-state">
+          <div className="empty-box">
+            <div className="empty-icon">🗂️</div>
+            <h2>No stickers <em>yet</em></h2>
+            <p>cut one from any clip and it lives here · reusable in every pack</p>
+            <div className="empty-actions">
+              <button className="btn btn-primary" onClick={onBack}>← Back to packs</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stickers.length > 0 && shown.length === 0 && (
+        <div className="empty-state">
+          <div className="empty-box">
+            <div className="empty-icon">🔍</div>
+            <h2>No match</h2>
+            <p>nothing called “{q}” in your {stickers.length} sticker{stickers.length === 1 ? '' : 's'}</p>
+            <div className="empty-actions">
+              <button className="btn btn-ghost" onClick={() => setQ('')}>✕ Clear search</button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="grid">
@@ -56,12 +83,14 @@ export default function StickerLibrary({
                 <div className="meta-line">
                   {packs.length === 0 ? 'in no pack' : `in ${packs.join(', ')}`}
                 </div>
+                <SpecBadge spec={s.spec} />
                 {editing === s.jobId ? (
                   <div className="emoji-picker">
                     {PALETTE.map(e => (
                       <button
                         key={e}
                         className="emoji-opt"
+                        aria-current={s.emojis.includes(e) ? 'true' : undefined}
                         onClick={() => { onSetEmojis(s.jobId, [e]); setEditing(null) }}
                       >
                         {e}
