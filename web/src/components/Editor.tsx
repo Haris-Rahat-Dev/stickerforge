@@ -236,6 +236,7 @@ export default function Editor({
                   onScrub={seekPreview}
                   onScrubEnd={endScrub}
                 />
+                <p className="tl-hint">Drag to trim · press a dimmed part to keep another cut</p>
                 <div className={`budget ${!budget.ok || budget.tight ? 'budget-over' : ''}`}>
                   {!budget.ok
                     ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s</span>

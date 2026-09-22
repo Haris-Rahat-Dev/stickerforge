@@ -415,6 +415,10 @@ select {
   margin-top: 8px; font-variant-numeric: tabular-nums;
 }
 .tl-span-bad { color: var(--amber); font-weight: 600; }
+.tl-hint {
+  margin: 6px 0 0; font-family: var(--font-mono); font-size: 11px;
+  color: var(--muted); opacity: 0.8; letter-spacing: 0.01em;
+}
 
 /* ── result ─────────────────────────────────────────────── */
 .result { display: grid; grid-template-columns: 340px 1fr; gap: 24px; padding: 8px 22px 24px; }
