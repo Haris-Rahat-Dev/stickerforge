@@ -9,7 +9,7 @@ import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { extractTray, buildFilters } from './convert.js'
 import { convertToAnimatedWebp, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, type WebpResult } from './webp.js'
 import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd, secondsThatFit } from './budget.js'
-import { normalizeSpans, type Span } from './spans.js'
+import { keptSeconds, normalizeSpans, type Span } from './spans.js'
 import { createLimiter } from './queue.js'
 import { reapOrphans } from './reap.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
@@ -442,6 +442,16 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     } else {
       job.status = 'error'
       job.error = err instanceof Error ? err.message : 'Conversion failed'
+      // Encode failures otherwise vanish into the client SSE with no server record.
+      // Log enough to tell a legitimate byte-budget fail-closed from a real crash.
+      const kept = keptSeconds(spans)
+      console.error(
+        `encode failed: job=${jobId} file=${rec.id} kind=${rec.kind} ` +
+        `${rec.meta.width}x${rec.meta.height} src=${rec.meta.duration.toFixed(1)}s ` +
+        `spans=${spans.length} kept=${kept.toFixed(2)}s fps=${fps} fit=${fit} ` +
+        `border=${border} — ${job.error}`,
+      )
+      if (err instanceof Error && err.name !== 'WebpBudgetError' && err.stack) console.error(err.stack)
     }
     publishJob(job)
   })

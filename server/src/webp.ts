@@ -334,11 +334,14 @@ export async function convertToAnimatedWebp(
     const cropF = crop ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` : ''
     const filters = buildFilters(fit, padColor, cropPos, border)
     const steps = fpsSteps(fps)
-    const lowestQ = 50
+    // Floor for the LAST fps only. A busy photographic clip at 512²/24fps needs q≈30
+    // to fit 4s under 500KB — flooring at 50 rejected clips that q30 encodes fine. The
+    // projections use this floor too, so they only fail closed when even q30 can't fit.
+    const lowestQ = 30
     // Keep q ≥ 70 while we still have fps to give. Crushing to 20 at 30fps is the
-    // pixelation users saw; 24fps at q70 beats 30fps mush.
+    // pixelation users saw; 24fps at q70 beats 30fps mush. Only the last fps drops below.
     const qualitiesAtFps = [90, 80, 70]
-    const lastResort = [60, 50]
+    const lastResort = [60, 50, 40, 30]
     let lastSize = 0
     let lastFps = steps[0]
     let lastHeld: HeldFrame[] = []
