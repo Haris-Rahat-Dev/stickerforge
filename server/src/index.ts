@@ -9,6 +9,7 @@ import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { extractTray, buildFilters } from './convert.js'
 import { convertToAnimatedWebp, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, type WebpResult } from './webp.js'
 import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd, secondsThatFit } from './budget.js'
+import { normalizeSpans, type Span } from './spans.js'
 import { createLimiter } from './queue.js'
 import { reapOrphans } from './reap.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
@@ -186,7 +187,7 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
   const fit = ['cover', 'contain', 'stretch'].includes(String(body.fit)) ? body.fit as FitMode : 'cover'
   if (rec.kind === 'image') {
     return {
-      start: 0, end: IMAGE_DUR, speed: 1, fps: IMAGE_FPS, fit,
+      start: 0, end: IMAGE_DUR, spans: [{ start: 0, end: IMAGE_DUR }], speed: 1, fps: IMAGE_FPS, fit,
       padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
       crop: sanitizeCrop(body.crop as Partial<CropRect> | null, rec.meta),
       cropPos: clampPos(body.cropPos),
@@ -202,8 +203,17 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
     duration || maxSrcSpanForSpeed(speed),
     start + maxSrcSpanForSpeed(speed),
   )
+  const raw: Span[] = Array.isArray(body.spans)
+    ? (body.spans as Partial<Span>[]).map(s => ({ start: Number(s.start) || 0, end: Number(s.end) || 0 }))
+    : [{ start, end }]
+  const spans = normalizeSpans(raw, duration || maxSrcSpanForSpeed(speed))
+  const first = spans[0] ?? { start, end }
   return {
-    start, end, speed,
+    // start/end mirror the first span so anything still reading those two fields
+    // (tray extract, single-span -ss/-t) sees one legal trim.
+    start: first.start, end: first.end,
+    spans: spans.length ? spans : [{ start: first.start, end: first.end }],
+    speed,
     fps: capFps(Number(body.fps) || rec.meta.fps),
     fit,
     padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
@@ -374,7 +384,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
   jobs.set(jobId, job)
   if (signal) jobAbort.set(jobId, controller ?? new AbortController())
 
-  const { start, end, speed, fps, fit, padColor, crop, cropPos, border } = settings
+  const { start, end, spans, speed, fps, fit, padColor, crop, cropPos, border } = settings
 
   const task = rec.kind === 'image'
     ? async () => {
@@ -389,7 +399,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
         // generation was the pixelation. Settings apply once here.
         const webp = await convertToAnimatedWebp({
           inputPath: rec.path, outPath: outputPath,
-          start, end, speed, fps, fit, padColor, crop, cropPos, border,
+          start, end, spans, speed, fps, fit, padColor, crop, cropPos, border,
         }, (p, stage) => {
           job.progress = p
           job.stage = stage
@@ -532,7 +542,7 @@ app.post('/api/batch', async (req, res) => {
 
     let settings: ConvertSettings
     if (rec.kind === 'image') {
-      settings = { start: 0, end: IMAGE_DUR, speed: 1, fps: IMAGE_FPS, fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false }
+      settings = { start: 0, end: IMAGE_DUR, spans: [{ start: 0, end: IMAGE_DUR }], speed: 1, fps: IMAGE_FPS, fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false }
     } else {
       const fps = capFps(rec.meta.fps)
       const end = openingTrimEnd(rec.meta.duration, rec.meta.fps)
@@ -540,7 +550,7 @@ app.post('/api/batch', async (req, res) => {
       const crop = detected && (detected.w < rec.meta.width - 8 || detected.h < rec.meta.height - 8)
         ? sanitizeCrop(detected, rec.meta)
         : null
-      settings = { start: 0, end, speed: 1, fps, fit: 'cover', padColor: '#000000', crop, cropPos: 0.5, border: false }
+      settings = { start: 0, end, spans: [{ start: 0, end }], speed: 1, fps, fit: 'cover', padColor: '#000000', crop, cropPos: 0.5, border: false }
     }
 
     const job = startJob(rec, settings, null)

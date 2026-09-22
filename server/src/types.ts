@@ -34,9 +34,13 @@ export interface CropRect {
 
 export type FitMode = 'cover' | 'contain' | 'stretch'
 
+import type { Span } from './spans.js'
+
 export interface ConvertSettings {
   start: number
   end: number
+  /** Kept ranges of the clip; `start`/`end` mirror the first span for old readers. */
+  spans: Span[]
   speed: number
   fps: number
   fit: FitMode

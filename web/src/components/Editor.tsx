@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
 import { capFps, MAX_STICKER_SEC, motionBudget, openingTrimEnd } from '../budget.js'
+import { keptSeconds, spansFromTrim, type Span } from '../spans.js'
 import Timeline, { stripFrameCount } from './Timeline.jsx'
-
-const MIN_SPAN = 0.3
 
 function squareCrop(w: number, h: number): CropRect {
   const s = Math.min(w, h)
@@ -33,8 +32,8 @@ export default function Editor({
   const isImage = file.kind === 'image'
   const needsFraming = Math.abs(meta.width / meta.height - 1) > 0.02
 
-  const [start, setStart] = useState(0)
-  const [end, setEnd] = useState(() => (isImage ? duration : openingTrimEnd(duration, meta.fps)))
+  const [spans, setSpans] = useState<Span[]>(() =>
+    isImage ? [{ start: 0, end: duration }] : spansFromTrim(0, openingTrimEnd(duration, meta.fps)))
   const [crop, setCrop] = useState<CropRect>(() => squareCrop(meta.width, meta.height))
   const [pad, setPad] = useState(needsFraming)
   const [cropDetecting, setCropDetecting] = useState(false)
@@ -48,8 +47,8 @@ export default function Editor({
   const scrubbing = useRef(false)
   const trimTouched = useRef(false)
   const encodeKey = `sf-encode:${file.id}`
-  const rangeRef = useRef({ start, end })
-  rangeRef.current = { start, end }
+  const spansRef = useRef(spans)
+  spansRef.current = spans
   const running = job?.status === 'running'
 
   useEffect(() => {
@@ -77,7 +76,7 @@ export default function Editor({
     let dead = false
     fitSpan(file.id).then(seconds => {
       if (dead || seconds == null) return
-      setEnd(prev => trimTouched.current || seconds == null ? prev : Math.min(duration, Math.max(0.5, seconds)))
+      setSpans(prev => trimTouched.current ? prev : [{ start: 0, end: Math.min(duration, Math.max(0.5, seconds)) }])
     }).finally(() => { if (!dead) setFitting(false) })
     return () => { dead = true }
   }, [file.id, isImage, duration])
@@ -109,10 +108,16 @@ export default function Editor({
     if (!v || isImage) return
     const onTick = (): void => {
       if (scrubbing.current) return
-      const { start: s, end: e } = rangeRef.current
-      if (v.currentTime >= e - 0.03 || v.currentTime < s - 0.4) v.currentTime = s
+      const cur = spansRef.current
+      if (!cur.length) return
+      const ct = v.currentTime
+      // Walk the kept ranges in order: which one are we in, or just past?
+      let i = -1
+      for (let k = 0; k < cur.length; k++) if (ct >= cur[k].start - 0.4) i = k
+      if (i === -1) { v.currentTime = cur[0].start; return }   // before the first range
+      if (ct >= cur[i].end - 0.03) v.currentTime = (cur[i + 1] ?? cur[0]).start
     }
-    v.currentTime = rangeRef.current.start
+    v.currentTime = spansRef.current[0]?.start ?? 0
     v.play().catch(() => {})
     v.addEventListener('timeupdate', onTick)
     return () => v.removeEventListener('timeupdate', onTick)
@@ -131,25 +136,25 @@ export default function Editor({
     videoRef.current?.play().catch(() => {})
   }
 
-  const outDur = end - start
+  const first = spans[0]
+  const outDur = keptSeconds(spans)
   const budget = motionBudget(outDur, meta.fps)
   const maxSpan = Math.min(MAX_STICKER_SEC, duration)
   const fit: FitMode = pad ? 'contain' : 'cover'
 
-  const setRange = (s: number, e: number): void => {
+  const onSpansChange = (next: Span[]): void => {
     trimTouched.current = true
-    let span = e - s
-    if (span < MIN_SPAN) { e = s + MIN_SPAN; if (e > duration) { e = duration; s = Math.max(0, e - MIN_SPAN) } }
-    setStart(s); setEnd(e)
+    setSpans(next.length ? next : spansFromTrim(0, MAX_STICKER_SEC))
   }
 
   const keepMotion = (): void => {
     trimTouched.current = true
-    const span = Math.min(budget.maxSeconds, duration - start)
-    let s = start
+    const from = first?.start ?? 0
+    const span = Math.min(budget.maxSeconds, duration - from)
+    let s = from
     let e = s + span
     if (e > duration) { e = duration; s = Math.max(0, e - span) }
-    setStart(s); setEnd(e)
+    setSpans([{ start: s, end: e }])
   }
 
   const doConvert = async (): Promise<void> => {
@@ -158,7 +163,9 @@ export default function Editor({
     setJob({ status: 'running', progress: 0, stage: 'starting', id: '', fileId: file.id, settings: {} as ConvertRequest })
     try {
       const id = await convert({
-        fileId: file.id, start, end, speed: 1, fps, fit,
+        fileId: file.id,
+        start: spans[0].start, end: spans[spans.length - 1].end, spans,
+        speed: 1, fps, fit,
         padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
       })
       sessionStorage.setItem(encodeKey, id)
@@ -221,12 +228,11 @@ export default function Editor({
               <>
                 <Timeline
                   duration={duration}
-                  start={start}
-                  end={end}
+                  spans={spans}
                   stripUrl={stripUrl}
                   maxSpan={maxSpan}
                   frameCount={stripFrameCount(duration)}
-                  onChange={setRange}
+                  onChange={onSpansChange}
                   onScrub={seekPreview}
                   onScrubEnd={endScrub}
                 />

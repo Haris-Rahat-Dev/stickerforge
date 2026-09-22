@@ -4,12 +4,14 @@ import path from 'node:path'
 import os from 'node:os'
 import { buildFilters } from './convert.js'
 import { firstMuxNeverFits, fpsSteps, planSpan, projectAnimatedBytes, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
+import { concatPrefix, keptSeconds, type Span } from './spans.js'
 import type { ConvertSettings } from './types.js'
 
-export type WebpOptions = Omit<ConvertSettings, 'speed'> & {
+export type WebpOptions = Omit<ConvertSettings, 'speed' | 'spans'> & {
   inputPath: string
   outPath: string
   speed?: number
+  spans?: Span[]
 }
 
 export interface WebpResult {
@@ -199,14 +201,18 @@ export async function probeHoldCount(
   fps: number,
   preVf: string,
   tmp: string,
+  concat: string | null = null,
 ): Promise<number> {
   const raw = path.join(tmp, `probe-${Math.round(fps * 100)}.gray`)
   const chain = [preVf, `fps=${fps}`, `scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`]
     .filter(Boolean).join(',')
+  // Several spans: concat joins them up front. A concat references [0:v] twice, which a
+  // simple -vf graph rejects, so it must run as -filter_complex with a mapped output.
+  const inputArgs = concat ? ['-i', inputPath] : ['-ss', String(start), '-t', String(srcSpan), '-i', inputPath]
+  const filterArgs = concat ? ['-filter_complex', `${concat}${chain}[out]`, '-map', '[out]'] : ['-vf', chain]
   try {
     await run('ffmpeg', [
-      '-ss', String(start), '-t', String(srcSpan), '-i', inputPath,
-      '-vf', chain, '-f', 'rawvideo', '-y', raw,
+      ...inputArgs, ...filterArgs, '-f', 'rawvideo', '-y', raw,
     ])
   } catch {
     return 0
@@ -232,17 +238,19 @@ export async function measureSpanBytes(
   preVf: string,
   heldFrames: number,
   tmp: string,
+  concat: string | null = null,
 ): Promise<number | null> {
   if (heldFrames <= 1 || fps <= 0) return null
   const dir = path.join(tmp, `sample-${Math.round(fps * 100)}`)
   await rm(dir, { recursive: true, force: true })
   await mkdir(dir, { recursive: true })
   const every = Math.max(1, Math.round(Math.max(srcSpan, 0.1) * fps / 8))
-  const vf = [preVf, `fps=${fps}`, `select=not(mod(n\\,${every}))`].filter(Boolean).join(',')
+  const chain = [preVf, `fps=${fps}`, `select=not(mod(n\\,${every}))`].filter(Boolean).join(',')
+  const inputArgs = concat ? ['-i', inputPath] : ['-ss', String(start), '-t', String(srcSpan), '-i', inputPath]
+  const filterArgs = concat ? ['-filter_complex', `${concat}${chain}[out]`, '-map', '[out]'] : ['-vf', chain]
   try {
     await run('ffmpeg', [
-      '-ss', String(start), '-t', String(srcSpan), '-i', inputPath,
-      '-vf', vf, '-frames:v', '8', '-y', path.join(dir, 'f%04d.png'),
+      ...inputArgs, ...filterArgs, '-frames:v', '8', '-y', path.join(dir, 'f%04d.png'),
     ])
     const names = (await readdir(dir)).filter(f => f.endsWith('.png')).sort()
     if (names.length < 2) return null
@@ -311,7 +319,13 @@ export async function convertToAnimatedWebp(
   progress?: (p: number, stage: string) => void,
 ): Promise<WebpResult> {
   const { inputPath, outPath, start, end, speed = 1, fps, fit, padColor, crop, cropPos, border } = opts
-  const { srcSpan, outDur } = planSpan(start, end, speed)
+  // Several kept ranges are concatenated up front; one range keeps the -ss/-t path.
+  const spans: Span[] = opts.spans && opts.spans.length ? opts.spans : [{ start, end }]
+  const concat = concatPrefix(spans)
+  const single = planSpan(start, end, speed)
+  // With a concat the source span is the joined length; -t is not used.
+  const srcSpan = concat ? keptSeconds(spans) : single.srcSpan
+  const outDur = concat ? keptSeconds(spans) : single.outDur
   const tmp = fs_mkdtemp()
   const framesDir = path.join(tmp, 'frames')
   await mkdir(framesDir, { recursive: true })
@@ -338,7 +352,7 @@ export async function convertToAnimatedWebp(
       // extract and muxes, and try the next rate. The last rate still encodes:
       // the byte model overestimates flat animation.
       const heldGuess = await probeHoldCount(
-        inputPath, start, srcSpan, outFps, `${cropF}setpts=PTS/${speed}`, tmp,
+        inputPath, start, srcSpan, outFps, `${cropF}setpts=PTS/${speed}`, tmp, concat,
       )
       if (skipFpsBeforeMux(heldGuess, outFps, isLast)) {
         progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
@@ -350,7 +364,7 @@ export async function convertToAnimatedWebp(
       // footage came out at 1007KB — find that out before extracting every frame.
       progress?.(base, 'Checking size')
       const projected = await measureSpanBytes(
-        inputPath, start, srcSpan, outFps, `${cropF}${filters},setpts=PTS/${speed}`, heldGuess, tmp,
+        inputPath, start, srcSpan, outFps, `${cropF}${filters},setpts=PTS/${speed}`, heldGuess, tmp, concat,
       )
       if (projected != null && projected > WEBP_TARGET) {
         if (isLast) throw new WebpBudgetError(projected, outDur, outFps, lowestQ)
@@ -362,12 +376,17 @@ export async function convertToAnimatedWebp(
       await rm(framesDir, { recursive: true, force: true })
       await mkdir(framesDir, { recursive: true })
       progress?.(base, `Extracting ${Math.round(outFps)}fps frames`)
+      const chain = `${cropF}${filters},setpts=PTS/${speed},fps=${outFps}`
+      const extractInput = concat
+        ? ['-i', inputPath]
+        : ['-ss', String(start), '-t', String(srcSpan), '-i', inputPath]
+      const extractFilter = concat
+        ? ['-filter_complex', `${concat}${chain}[out]`, '-map', '[out]']
+        : ['-vf', chain]
       await runWithProgress('ffmpeg', [
         '-progress', 'pipe:1', '-nostats',
-        '-ss', String(start),
-        '-t', String(srcSpan),
-        '-i', inputPath,
-        '-vf', `${cropF}${filters},setpts=PTS/${speed},fps=${outFps}`,
+        ...extractInput,
+        ...extractFilter,
         `${framesDir}/f%04d.png`
       ], f => progress?.(base + f * span * 0.5, `Extracting ${Math.round(outFps)}fps frames`), srcSpan)
 
