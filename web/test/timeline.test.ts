@@ -1,6 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { applyTrimDrag, hitMode, timeAt } from '../src/components/Timeline.tsx'
+import { applyTrimDrag, hitMode, stripFrameCount, timeAt } from '../src/components/Timeline.tsx'
+
+test('strip shows four frames a second, not a fixed dozen', () => {
+  assert.equal(stripFrameCount(8.1), 33)
+  assert.equal(stripFrameCount(1), 8)
+  assert.equal(stripFrameCount(40), 80)
+})
 
 test('timeAt maps click x onto [0, duration]', () => {
   assert.equal(timeAt(50, 0, 100, 10), 5)

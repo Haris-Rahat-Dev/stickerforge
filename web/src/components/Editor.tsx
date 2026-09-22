@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
 import { capFps, MAX_STICKER_SEC, motionBudget, openingTrimEnd } from '../budget.js'
-import Timeline from './Timeline.jsx'
+import Timeline, { stripFrameCount } from './Timeline.jsx'
 
 const MIN_SPAN = 0.3
 
@@ -225,6 +225,7 @@ export default function Editor({
                   end={end}
                   stripUrl={stripUrl}
                   maxSpan={maxSpan}
+                  frameCount={stripFrameCount(duration)}
                   onChange={setRange}
                   onScrub={seekPreview}
                   onScrubEnd={endScrub}

@@ -293,8 +293,11 @@ app.get('/api/filmstrip/:id', ah(async (req, res) => {
   const out = path.join(DATA, `${req.params.id}-strip.jpg`)
   try {
     if (!fs.existsSync(out)) {
-      const n = 12
-      const fpsArg = n / Math.max(rec.meta.duration, 0.5)
+      // Four frames a second, clamped to a readable range, so the trim aims at real
+      // frames rather than a fixed dozen smeared across the whole clip.
+      const duration = Math.max(rec.meta.duration, 0.5)
+      const n = Math.min(80, Math.max(8, Math.ceil(duration * 4)))
+      const fpsArg = n / duration
       await new Promise<void>((resolve, reject) => {
         const p = spawn('ffmpeg', [
           '-i', rec.path,

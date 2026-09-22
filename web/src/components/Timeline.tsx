@@ -4,6 +4,12 @@ const MIN_SPAN = 0.3
 const DRAG_PX = 4
 const HANDLE_PX = 20
 
+/** Four frames a second so the trim aims at real frames, clamped to a readable 8–80. */
+export function stripFrameCount(durationSec: number): number {
+  const n = Math.ceil(Math.max(0, durationSec) * 4)
+  return Math.min(80, Math.max(8, n))
+}
+
 export function timeAt(x: number, left: number, width: number, duration: number): number {
   if (width <= 0) return 0
   return Math.min(duration, Math.max(0, ((x - left) / width) * duration))
@@ -45,6 +51,7 @@ interface TimelineProps {
   end: number
   stripUrl: string | null
   maxSpan: number
+  frameCount: number
   onChange: (start: number, end: number) => void
   onScrub?: (t: number) => void
   onScrubEnd?: () => void
@@ -60,7 +67,7 @@ interface DragState {
   armed: boolean
 }
 
-export default function Timeline({ duration, start, end, stripUrl, maxSpan, onChange, onScrub, onScrubEnd }: TimelineProps) {
+export default function Timeline({ duration, start, end, stripUrl, maxSpan, frameCount, onChange, onScrub, onScrubEnd }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   const live = useRef({ duration, start, end, onChange, onScrub, onScrubEnd })
   live.current = { duration, start, end, onChange, onScrub, onScrubEnd }
@@ -122,24 +129,27 @@ export default function Timeline({ duration, start, end, stripUrl, maxSpan, onCh
 
   return (
     <div className="timeline">
-      <div
-        className="tl-track"
-        ref={trackRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      >
-        {stripUrl && <img className="tl-strip" src={stripUrl} alt="" draggable={false} />}
-        {!stripUrl && <div className="tl-strip tl-strip-empty" />}
-        <div className={`tl-dim ${overLimit ? 'tl-over' : ''}`} style={{ left: 0, width: pct(start) }} />
-        <div className={`tl-dim ${overLimit ? 'tl-over' : ''}`} style={{ left: pct(end), right: 0 }} />
+      <div className="tl-scroll">
         <div
-          className={`tl-window ${overLimit ? 'tl-over' : ''}`}
-          style={{ left: pct(start), width: pct(span) }}
+          className="tl-track"
+          ref={trackRef}
+          style={{ ['--strip-w' as string]: `${frameCount * 64}px` }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
         >
-          <div className="tl-handle tl-handle-left" />
-          <div className="tl-handle tl-handle-right" />
+          {stripUrl && <img className="tl-strip" src={stripUrl} alt="" draggable={false} />}
+          {!stripUrl && <div className="tl-strip tl-strip-empty" />}
+          <div className={`tl-dim ${overLimit ? 'tl-over' : ''}`} style={{ left: 0, width: pct(start) }} />
+          <div className={`tl-dim ${overLimit ? 'tl-over' : ''}`} style={{ left: pct(end), right: 0 }} />
+          <div
+            className={`tl-window ${overLimit ? 'tl-over' : ''}`}
+            style={{ left: pct(start), width: pct(span) }}
+          >
+            <div className="tl-handle tl-handle-left" />
+            <div className="tl-handle tl-handle-right" />
+          </div>
         </div>
       </div>
       <div className="tl-labels">
