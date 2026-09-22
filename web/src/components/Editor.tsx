@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob } from '../api.js'
-import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
+import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob, estimate } from '../api.js'
+import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, Job } from '../types.js'
 import { capFps, MAX_STICKER_SEC, motionBudget, openingTrimEnd } from '../budget.js'
 import { keptSeconds, normalizeSpans, spansFromTrim, splitAt, type Span } from '../spans.js'
 import Timeline from './Timeline.jsx'
@@ -44,6 +44,8 @@ export default function Editor({
   const [fitting, setFitting] = useState(!isImage)
   const [currentTime, setCurrentTime] = useState(0)
   const [playing, setPlaying] = useState(!isImage)
+  const [est, setEst] = useState<EstimateResult | null>(null)
+  const [estimating, setEstimating] = useState(!isImage)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const playingRef = useRef(playing)
@@ -128,6 +130,32 @@ export default function Editor({
     return () => v.removeEventListener('timeupdate', onTick)
   }, [file.id, isImage])
 
+  // Live projection of the current framing/trim — drives the readout under the timeline.
+  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad })
+  useEffect(() => {
+    if (isImage) return
+    const ctrl = new AbortController()
+    let cancelled = false
+    let retry: ReturnType<typeof setTimeout> | undefined
+    setEstimating(true)
+    const req: ConvertRequest = {
+      fileId: file.id, start: spans[0].start, end: spans[spans.length - 1].end, spans,
+      speed: 1, fps, fit: pad ? 'contain' : 'cover', padColor: '#000000',
+      crop: pad ? null : crop, cropPos: 0.5, border,
+    }
+    const debounce = setTimeout(function go(): void {
+      estimate(req, ctrl.signal)
+        .then(r => {
+          if (cancelled) return
+          if (r.busy) { retry = setTimeout(go, 700); return }   // one estimate per user — retry
+          setEst(r); setEstimating(false)
+        })
+        .catch(() => { if (!cancelled) setEstimating(false) })
+    }, 450)
+    return () => { cancelled = true; ctrl.abort(); clearTimeout(debounce); if (retry) clearTimeout(retry) }
+    // estKey folds in spans/crop/pad/border; fps is constant per file.
+  }, [estKey, file.id, isImage, fps]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const seekPreview = (t: number): void => {
     const v = videoRef.current
     if (!v) return
@@ -170,13 +198,13 @@ export default function Editor({
     setSpans(next.length ? next : spansFromTrim(0, MAX_STICKER_SEC))
   }
 
-  const keepMotion = (): void => {
+  // Collapse to one span of `sec` from the first kept start — the "trim to fit" action.
+  const trimTo = (sec: number): void => {
     trimTouched.current = true
     const from = first?.start ?? 0
-    const span = Math.min(budget.maxSeconds, duration - from)
     let s = from
-    let e = s + span
-    if (e > duration) { e = duration; s = Math.max(0, e - span) }
+    let e = s + sec
+    if (e > duration) { e = duration; s = Math.max(0, e - sec) }
     setSpans([{ start: s, end: e }])
   }
 
@@ -280,26 +308,31 @@ export default function Editor({
                 <p className="tl-hint">
                   Click the strip to move the playhead · drag a cut’s edges to trim, its body to move · ✂ cuts at the playhead{spans.length > 1 ? ' · ✕ removes a cut' : ''}
                 </p>
-                <div className={`budget ${!budget.ok || budget.tight ? 'budget-over' : ''}`}>
+                <div
+                  className={`budget est-line ${(!budget.ok || est?.fits === false || est?.quality === 'very soft') ? 'budget-over' : ''}`}
+                  data-quality={est?.fits ? est.quality : undefined}
+                >
                   {!budget.ok
-                    ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s</span>
-                    : budget.tight
+                    ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s — trim below {MAX_STICKER_SEC}s</span>
+                    : est?.fits === false
                     ? (
                       <>
-                        <span>
-                          {fitting ? 'Checking holds… ' : ''}
-                          {fps}fps motion fits about {budget.maxSeconds.toFixed(1)}s. Still frames can run longer.
-                        </span>
-                        <button className="btn btn-sm" onClick={keepMotion}>Safer trim · {budget.maxSeconds.toFixed(1)}s</button>
+                        <span>Won’t fit at {fps}fps — about {(est.maxSeconds ?? 0).toFixed(1)}s fits at this framing{pad ? '' : ' (try Fit whole)'}.</span>
+                        <button className="btn btn-sm" onClick={() => trimTo(est.maxSeconds ?? outDur)}>Trim · {(est.maxSeconds ?? 0).toFixed(1)}s</button>
                       </>
                     )
-                    : fitting
-                    ? <span>Checking how much of this clip can stay…</span>
-                    : <span>
-                        {outDur.toFixed(1)}s
-                        {duration - outDur > 0.05 ? ` of ${duration.toFixed(1)}s` : ''}
-                        {` · ${fps}fps`}
-                      </span>}
+                    : est?.fits
+                    ? (
+                      <span>
+                        <b>≈ {est.projectedKB}KB</b> · {outDur.toFixed(1)}s · {est.effectiveFps}fps
+                        {est.effectiveFps != null && est.effectiveFps < fps ? ` (${fps} in motion)` : ''}
+                        {' · '}<span className="est-q">{est.quality} · q{est.qNeeded}</span>
+                        {estimating ? ' · updating…' : ''}
+                      </span>
+                    )
+                    : (estimating || fitting)
+                    ? <span>Checking how this clip fits…</span>
+                    : <span>{outDur.toFixed(1)}s · {fps}fps</span>}
                 </div>
               </>
             )}

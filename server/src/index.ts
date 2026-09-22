@@ -7,7 +7,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { extractTray, buildFilters } from './convert.js'
-import { convertToAnimatedWebp, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, type WebpResult } from './webp.js'
+import { convertToAnimatedWebp, estimateSticker, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, type WebpResult } from './webp.js'
 import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd, secondsThatFit } from './budget.js'
 import { keptSeconds, normalizeSpans, type Span } from './spans.js'
 import { createLimiter } from './queue.js'
@@ -467,6 +467,26 @@ app.post('/api/convert', (req, res) => {
   const job = startJob(rec, settings, controller.signal)
   res.json({ jobId: job.id })
 })
+
+// Live projection for the editor: what the current framing/trim would produce, without
+// a full encode. One estimate per user at a time — a fetch abort doesn't stop the ffmpeg
+// it started, so a busy reply keeps rapid drags from stacking sample encodes on the VM.
+const estimating = new Set<string>()
+app.post('/api/estimate', ah(async (req, res) => {
+  const rec = ownedFile(req, String(req.body.fileId || ''))
+  if (!rec) { res.status(404).json({ error: 'File not found' }); return }
+  if (rec.kind === 'image') { res.json({ fits: true, image: true }); return }
+  if (estimating.has(req.userId)) { res.json({ busy: true }); return }
+  estimating.add(req.userId)
+  try {
+    const est = await estimateSticker(rec.path, parseSettings(req.body, rec))
+    res.json(est)
+  } catch {
+    res.json({ unknown: true })   // never block the editor on a projection failure
+  } finally {
+    estimating.delete(req.userId)
+  }
+}))
 
 app.get('/api/job/:id', (req, res) => {
   const job = ownedJob(req, req.params.id)

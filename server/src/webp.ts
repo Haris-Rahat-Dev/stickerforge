@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { buildFilters } from './convert.js'
-import { firstMuxNeverFits, fpsSteps, planSpan, projectAnimatedBytes, projectedNeverFits, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
+import { estimatedBytes, firstMuxNeverFits, fpsSteps, MAX_STICKER_SEC, planSpan, projectAnimatedBytes, projectedNeverFits, secondsThatFit, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
 import { concatPrefix, keptSeconds, type Span } from './spans.js'
 import type { ConvertSettings } from './types.js'
 
@@ -306,6 +306,116 @@ export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult
   }
 }
 
+export interface EstimateResult {
+  fits: boolean
+  keptSeconds: number
+  fps: number             // requested (capped) frame rate
+  effectiveFps: number    // after hold-merging — the average the sticker will report
+  projectedKB: number     // estimated size at the quality it would land on
+  qNeeded: number         // 30..90 the encoder would settle at
+  quality: 'crisp' | 'good' | 'soft' | 'very soft'
+  maxSeconds: number      // longest kept time that would still fit at this framing
+}
+
+// bytes(q) ≈ bytes50 · (q/50)², the same quality curve the ladder's projections assume.
+const QUALITY_EXP = 2
+
+function qualityLabel(q: number): EstimateResult['quality'] {
+  if (q >= 75) return 'crisp'
+  if (q >= 55) return 'good'
+  if (q >= 40) return 'soft'
+  return 'very soft'
+}
+
+/**
+ * Cheap live projection of what the current framing/trim would produce, without a full
+ * encode. One 16×16 hold probe + one 8-frame sample mux (~1–2s), then the ladder's own
+ * quality curve says which q it would land on and whether it fits 500KB. An estimate,
+ * not a guarantee — the real encode still fails closed at [WEBP_TARGET].
+ */
+export async function estimateSticker(inputPath: string, opts: ConvertSettings): Promise<EstimateResult> {
+  const spans = opts.spans && opts.spans.length ? opts.spans : [{ start: opts.start, end: opts.end }]
+  const kept = keptSeconds(spans)
+  const fps = opts.fps
+  const speed = opts.speed || 1
+  const concat = concatPrefix(spans)
+  const cropF = opts.crop ? `crop=${opts.crop.w}:${opts.crop.h}:${opts.crop.x}:${opts.crop.y},` : ''
+  const filters = buildFilters(opts.fit, opts.padColor, opts.cropPos, opts.border)
+  const start = spans[0].start
+  const tmp = fs_mkdtemp()
+  await mkdir(tmp, { recursive: true })
+  try {
+    // Effective frame count after hold-merging, over the whole kept span (cheap 16×16).
+    const held = await probeHoldCount(inputPath, start, kept, fps, `${cropF}setpts=PTS/${speed}`, tmp, concat)
+    const effFrames = held > 1 ? held : Math.max(2, Math.round(kept * fps))
+
+    // Real per-frame cost from a CONTIGUOUS sample (distinct delta frames at the true
+    // frame rate), not the every-Nth subsample measureSpanBytes uses. Sampled from ~40%
+    // into the first span — the opening is often calmer than the sustained motion, which
+    // would under-project a busy clip.
+    const sampleSec = Math.min(kept, 1.5)
+    const firstLen = spans[0].end - spans[0].start
+    const sampleStart = start + Math.max(0, (Math.min(firstLen, kept) - sampleSec) * 0.4)
+    const dir = path.join(tmp, 'sample')
+    await mkdir(dir, { recursive: true })
+    await run('ffmpeg', [
+      '-ss', String(sampleStart), '-t', String(sampleSec), '-i', inputPath,
+      '-vf', `${cropF}${filters},setpts=PTS/${speed},fps=${fps}`, `${dir}/f%04d.png`,
+    ])
+    const names = (await readdir(dir)).filter(f => f.endsWith('.png')).sort()
+    const frameMs = Math.max(8, Math.round(1000 / fps))
+    const list = names.map(f => ({ path: path.join(dir, f), durationMs: frameMs }))
+
+    let bytesAt: (q: number) => number
+    if (list.length >= 2) {
+      const size = async (q: number): Promise<number> => {
+        const out = path.join(dir, `s-q${q}.webp`)
+        await muxImg2Webp(list, out, q)
+        return (await stat(out)).size / list.length   // per-frame bytes at this quality
+      }
+      // Two points give WebP's real (flat) quality curve — the (q/50)² model was wrong.
+      const per50 = await size(50)
+      const per30 = await size(30)
+      const b50 = per50 * effFrames
+      const b30 = per30 * effFrames
+      const e = b30 > 0 && b50 > 0 && b50 !== b30
+        ? Math.min(2, Math.max(0.3, Math.log(b50 / b30) / Math.log(50 / 30)))
+        : QUALITY_EXP
+      bytesAt = (q: number) => b50 * Math.pow(q / 50, e)
+    } else {
+      const b50 = estimatedBytes(kept, fps)
+      bytesAt = (q: number) => b50 * Math.pow(q / 50, QUALITY_EXP)
+    }
+
+    // Bias conservative: the sample is the clip's opening, which can be calmer than a
+    // busy tail, so leave headroom below 500KB. Better to say "trim a hair" than to green-
+    // light a clip that then fails closed on Add.
+    const targetEst = WEBP_TARGET * 0.94
+    const fits = bytesAt(30) <= targetEst
+    // The encoder lands on the HIGHEST q that fits (ladder runs 90→30, stops at first fit).
+    const qNeeded = solveQ(bytesAt, targetEst)
+    const effectiveFps = Math.min(fps, Math.max(1, Math.round(effFrames / Math.max(0.1, kept))))
+    return {
+      fits,
+      keptSeconds: Math.round(kept * 100) / 100,
+      fps,
+      effectiveFps,
+      projectedKB: Math.round(bytesAt(qNeeded) / 1024),
+      qNeeded,
+      quality: qualityLabel(qNeeded),
+      maxSeconds: fits ? Math.min(MAX_STICKER_SEC, kept) : secondsThatFit(kept, bytesAt(30), targetEst),
+    }
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+}
+
+/** Highest q in [30,90] whose projected size is under target; 30 if none fit. */
+function solveQ(bytesAt: (q: number) => number, target: number): number {
+  for (let q = 90; q >= 30; q--) if (bytesAt(q) <= target) return q
+  return 30
+}
+
 /**
  * Animated WebP for WhatsApp third-party sticker packs.
  * ffmpeg frames → img2webp (WebPAnimEncoder: mixed + delta frames).
@@ -467,7 +577,7 @@ export function unknownImg2webpFlag(message: string): string | null {
   return /Unknown option \[(-[\w]+)\]/.exec(message)?.[1] ?? null
 }
 
-async function muxImg2Webp(frames: HeldFrame[], outPath: string, q: number): Promise<void> {
+export async function muxImg2Webp(frames: HeldFrame[], outPath: string, q: number): Promise<void> {
   if (frames.length === 0) throw new Error('no frames to mux')
   // A trim with no motion at all collapses to a single held frame. Feeding img2webp
   // the same picture twice still yields a *static* WebP — it dedupes them — and

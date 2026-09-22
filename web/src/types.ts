@@ -63,6 +63,21 @@ export interface ConvertRequest extends ConvertSettings {
   fileId: string
 }
 
+/** Live projection from /api/estimate. All fields optional — server may reply busy/unknown/image. */
+export interface EstimateResult {
+  fits?: boolean
+  keptSeconds?: number
+  fps?: number
+  effectiveFps?: number
+  projectedKB?: number
+  qNeeded?: number
+  quality?: 'crisp' | 'good' | 'soft' | 'very soft'
+  maxSeconds?: number
+  busy?: boolean
+  unknown?: boolean
+  image?: boolean
+}
+
 export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'
 
 /**

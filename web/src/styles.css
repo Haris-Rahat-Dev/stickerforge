@@ -337,6 +337,11 @@ body::after {
   background: var(--panel-2); border: 1px solid var(--line);
 }
 .budget-over { border-color: var(--amber); color: var(--amber); }
+.est-q { font-weight: 600; }
+.est-line[data-quality="crisp"] .est-q,
+.est-line[data-quality="good"] .est-q { color: var(--green); }
+.est-line[data-quality="soft"] .est-q,
+.est-line[data-quality="very soft"] .est-q { color: var(--amber); }
 
 .advanced { margin-top: 4px; }
 .adv-toggle { align-self: flex-start; color: var(--muted); }

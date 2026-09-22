@@ -1,4 +1,4 @@
-import type { BatchJobInfo, ConvertRequest, CropRect, FileRecord, Job, StickerSpec, StickerView } from './types.js'
+import type { BatchJobInfo, ConvertRequest, CropRect, EstimateResult, FileRecord, Job, StickerSpec, StickerView } from './types.js'
 import { authHeader, tokenQuery, freshTokenQuery } from './auth.js'
 
 const BASE = ''
@@ -79,6 +79,17 @@ export async function convert(settings: ConvertRequest): Promise<string> {
   const json = await res.json()
   if (!res.ok) throw new Error(json.error || 'Convert failed')
   return json.jobId as string
+}
+
+export async function estimate(settings: ConvertRequest, signal?: AbortSignal): Promise<EstimateResult> {
+  const res = await apiFetch(`${BASE}/api/estimate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+    signal,
+  })
+  if (!res.ok) throw new Error('Estimate failed')
+  return res.json() as Promise<EstimateResult>
 }
 
 export async function quickConvert(fileId: string): Promise<string> {
