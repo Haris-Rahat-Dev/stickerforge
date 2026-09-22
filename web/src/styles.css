@@ -406,6 +406,16 @@ select {
   background: var(--green); cursor: ew-resize; pointer-events: none;
   display: grid; place-items: center;
 }
+.tl-del {
+  position: absolute; top: 3px; right: 3px; z-index: 2;
+  width: 18px; height: 18px; padding: 0; line-height: 1;
+  display: grid; place-items: center; pointer-events: auto; cursor: pointer;
+  font-size: 11px; color: var(--cream, #f4f0e6);
+  background: rgba(10, 12, 8, 0.72); border: 1px solid var(--green);
+  border-radius: 5px;
+}
+.tl-del:hover { background: var(--amber); color: #1a1a1a; border-color: var(--amber); }
+.tl-window.tl-over .tl-del { border-color: var(--amber); }
 .tl-handle-left { left: -2px; border-radius: 5px 0 0 5px; }
 .tl-handle-right { right: -2px; border-radius: 0 5px 5px 0; }
 .tl-handle::after { content: ''; width: 3px; height: 18px; border-radius: 2px; background: rgba(0, 0, 0, 0.4); }

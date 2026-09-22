@@ -145,6 +145,12 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCoun
     live.current.onScrub?.(scrub)
   }
 
+  const removeSpan = (i: number): void => {
+    const d = live.current.duration
+    const next = live.current.spans.filter((_, k) => k !== i)
+    live.current.onChange(normalizeSpans(next, d))
+  }
+
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>): void => {
     const drag = dragRef.current
     if (!drag || e.pointerId !== drag.pointerId) return
@@ -193,6 +199,14 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCoun
             >
               <div className="tl-handle tl-handle-left" />
               <div className="tl-handle tl-handle-right" />
+              {spans.length > 1 && (
+                <button
+                  className="tl-del"
+                  title="Remove this cut"
+                  onPointerDown={e => { e.stopPropagation(); e.preventDefault() }}
+                  onClick={e => { e.stopPropagation(); removeSpan(i) }}
+                >✕</button>
+              )}
             </div>
           ))}
         </div>
