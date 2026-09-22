@@ -31,3 +31,6 @@ secrets/
 **/firebase-service-account*.json
 **-firebase-adminsdk-*.json
 
+
+# agent planning scratch (superpowers plans/specs)
+docs/superpowers/
