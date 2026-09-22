@@ -1,23 +1,8 @@
-import { useState } from 'react'
-import { outputPreviewUrl, webpPreviewUrl } from '../api.js'
+import { webpPreviewUrl } from '../api.js'
 
+// Always the real encoded WebP — the exact bytes the pack ships and WhatsApp renders.
+// No <video>/WebM fallback: the WebM is a different (or absent) encode and would
+// misrepresent the sticker.
 export default function StickerPreview({ jobId, className }: { jobId: string; className?: string }) {
-  const [fallback, setFallback] = useState(false)
-  if (fallback) {
-    return (
-      <video
-        className={className}
-        src={outputPreviewUrl(jobId)}
-        muted loop autoPlay playsInline preload="metadata"
-      />
-    )
-  }
-  return (
-    <img
-      className={className}
-      src={webpPreviewUrl(jobId)}
-      alt=""
-      onError={() => setFallback(true)}
-    />
-  )
+  return <img className={className} src={webpPreviewUrl(jobId)} alt="" />
 }

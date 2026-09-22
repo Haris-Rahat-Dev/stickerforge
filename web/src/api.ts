@@ -204,10 +204,6 @@ export async function cancelJob(jobId: string): Promise<void> {
   await apiFetch(`${BASE}/api/job/${jobId}/cancel`, { method: 'POST' })
 }
 
-export function outputPreviewUrl(jobId: string): string {
-  return `${BASE}/api/output/preview/${jobId}${tokenQuery()}`
-}
-
 export function webpPreviewUrl(jobId: string): string {
   return `${BASE}/api/output/webp/${jobId}${tokenQuery()}`
 }
