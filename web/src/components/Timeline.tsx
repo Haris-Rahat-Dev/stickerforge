@@ -1,9 +1,9 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { keptSeconds, normalizeSpans, type Span } from '../spans.js'
 
 const MIN_SPAN = 0.3
 const DRAG_PX = 4
-const HANDLE_PX = 20
+const HANDLE_PX = 14
 
 /** Four frames a second so the trim aims at real frames, clamped to a readable 8–80. */
 export function stripFrameCount(durationSec: number): number {
@@ -46,23 +46,35 @@ export function applyTrimDrag(
   return { start: s, end: s + span }
 }
 
+/** A "nice" ruler step (1/2/5 × 10ⁿ) so ~`target` ticks span the duration. */
+function niceStep(seconds: number, target: number): number {
+  const raw = Math.max(seconds / Math.max(1, target), 0.05)
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)))
+  for (const m of [1, 2, 5, 10]) if (m * mag >= raw) return m * mag
+  return 10 * mag
+}
+
+function fmt(t: number): string {
+  return `${t.toFixed(t < 10 ? 1 : 0)}s`
+}
+
 interface TimelineProps {
   duration: number
   spans: Span[]
   stripUrl: string | null
   maxSpan: number
-  frameCount: number
+  currentTime: number
   onChange: (spans: Span[]) => void
-  onScrub?: (t: number) => void
-  onScrubEnd?: () => void
+  onSeek: (t: number) => void
+  onSeekEnd?: () => void
 }
 
 interface DragState {
+  kind: 'window' | 'seek'
   mode: TrimMode
   grabOffset: number
   originStart: number
   originEnd: number
-  /** All spans as they were when the drag began — the drag replaces just one of them. */
   originSpans: Span[]
   index: number
   pointerId: number
@@ -70,18 +82,29 @@ interface DragState {
   armed: boolean
 }
 
-export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCount, onChange, onScrub, onScrubEnd }: TimelineProps) {
+export default function Timeline({ duration, spans, stripUrl, maxSpan, currentTime, onChange, onSeek, onSeekEnd }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
-  const live = useRef({ duration, spans, onChange, onScrub, onScrubEnd })
-  live.current = { duration, spans, onChange, onScrub, onScrubEnd }
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [zoom, setZoom] = useState(1)
+  const live = useRef({ duration, spans, onChange, onSeek, onSeekEnd })
+  live.current = { duration, spans, onChange, onSeek, onSeekEnd }
   const dragRef = useRef<DragState | null>(null)
+
+  // Keep the playhead in view as it plays or the zoom changes.
+  useEffect(() => {
+    const sc = scrollRef.current
+    if (!sc || duration <= 0) return
+    const x = (currentTime / duration) * sc.scrollWidth
+    if (x < sc.scrollLeft + 24 || x > sc.scrollLeft + sc.clientWidth - 24) {
+      sc.scrollLeft = Math.max(0, x - sc.clientWidth / 2)
+    }
+  }, [currentTime, zoom, duration])
 
   const pointTime = (clientX: number): number => {
     const rect = trackRef.current!.getBoundingClientRect()
     return timeAt(clientX, rect.left, rect.width, live.current.duration)
   }
 
-  /** Topmost span (last drawn) whose window or handles cover x, or -1 for a gap. */
   const hitSpan = (localX: number, width: number, d: number): number => {
     const cur = live.current.spans
     for (let i = cur.length - 1; i >= 0; i--) {
@@ -95,37 +118,23 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCoun
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
     if (e.button !== 0) return
     e.preventDefault()
-    const rect = e.currentTarget.getBoundingClientRect()
+    const rect = trackRef.current!.getBoundingClientRect()
     const d = live.current.duration
     const localX = e.clientX - rect.left
     const t = timeAt(e.clientX, rect.left, rect.width, d)
-    let cur = live.current.spans
-    let index = hitSpan(localX, rect.width, d)
-    let mode: TrimMode = 'move'
+    const cur = live.current.spans
+    const index = hitSpan(localX, rect.width, d)
+    let drag: DragState
     if (index < 0) {
-      // A press in a gap opens a new one-second window and drags its end to size it.
-      const add: Span = { start: t, end: Math.min(duration, t + 1) }
-      cur = normalizeSpans([...cur, add], d)
-      index = cur.findIndex(s => t >= s.start - 0.001 && t <= s.end + 0.001)
-      if (index < 0) return
-      mode = 'end'
-      live.current.onChange(cur)
+      // Empty timeline: move the playhead (and scrub while dragging).
+      drag = { kind: 'seek', mode: 'move', grabOffset: 0, originStart: 0, originEnd: 0, originSpans: cur, index: -1, pointerId: e.pointerId, originX: e.clientX, armed: true }
+      live.current.onSeek(t)
     } else {
       const sx = d > 0 ? (cur[index].start / d) * rect.width : 0
       const ex = d > 0 ? (cur[index].end / d) * rect.width : 0
-      mode = hitMode(localX, sx, ex)
+      drag = { kind: 'window', mode: hitMode(localX, sx, ex), grabOffset: t - cur[index].start, originStart: cur[index].start, originEnd: cur[index].end, originSpans: cur, index, pointerId: e.pointerId, originX: e.clientX, armed: false }
     }
-    dragRef.current = {
-      mode,
-      grabOffset: t - cur[index].start,
-      originStart: cur[index].start,
-      originEnd: cur[index].end,
-      originSpans: cur,
-      index,
-      pointerId: e.pointerId,
-      originX: e.clientX,
-      armed: mode === 'end',
-    }
+    dragRef.current = drag
     e.currentTarget.setPointerCapture(e.pointerId)
   }
 
@@ -138,28 +147,25 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCoun
     }
     const t = pointTime(e.clientX)
     const d = live.current.duration
+    if (drag.kind === 'seek') { live.current.onSeek(t); return }
     const one = applyTrimDrag(drag.mode, t, drag.originStart, drag.originEnd, d, drag.grabOffset)
     const next = drag.originSpans.map((s, i) => i === drag.index ? one : s)
     live.current.onChange(normalizeSpans(next, d))
-    const scrub = drag.mode === 'start' ? one.start : drag.mode === 'end' ? one.end : Math.min(one.end, Math.max(one.start, t))
-    live.current.onScrub?.(scrub)
-  }
-
-  const removeSpan = (i: number): void => {
-    const d = live.current.duration
-    const next = live.current.spans.filter((_, k) => k !== i)
-    live.current.onChange(normalizeSpans(next, d))
+    live.current.onSeek(drag.mode === 'start' ? one.start : drag.mode === 'end' ? one.end : Math.min(one.end, Math.max(one.start, t)))
   }
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>): void => {
     const drag = dragRef.current
     if (!drag || e.pointerId !== drag.pointerId) return
     dragRef.current = null
-    if (!drag.armed) {
-      const t = pointTime(e.clientX)
-      if (t >= drag.originStart && t <= drag.originEnd) live.current.onScrub?.(t)
-    }
-    live.current.onScrubEnd?.()
+    // A click on a window (no drag) seeks the playhead there.
+    if (drag.kind === 'window' && !drag.armed) live.current.onSeek(pointTime(e.clientX))
+    live.current.onSeekEnd?.()
+  }
+
+  const removeSpan = (i: number): void => {
+    const d = live.current.duration
+    live.current.onChange(normalizeSpans(live.current.spans.filter((_, k) => k !== i), d))
   }
 
   const pct = (t: number): string => `${duration > 0 ? (t / duration) * 100 : 0}%`
@@ -168,35 +174,38 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCoun
   const first = spans[0]
   const last = spans[spans.length - 1]
 
-  // Dim every stretch that is not kept: before the first span, between spans, after the last.
   const gaps: { left: number; width: number }[] = []
   if (first) gaps.push({ left: 0, width: first.start })
   for (let i = 0; i < spans.length - 1; i++) gaps.push({ left: spans[i].end, width: spans[i + 1].start - spans[i].end })
   if (last) gaps.push({ left: last.end, width: Math.max(0, duration - last.end) })
 
+  const step = niceStep(duration, 6 * zoom)
+  const ticks: number[] = []
+  for (let t = 0; t <= duration + 1e-6; t += step) ticks.push(Math.round(t * 100) / 100)
+
   return (
-    <div className="timeline">
-      <div className="tl-scroll">
+    <div className="tl">
+      <div className="tl-zoom">
+        <button className="btn btn-ghost btn-sm" disabled={zoom <= 1} onClick={() => setZoom(z => Math.max(1, z - 1))} title="Zoom out">−</button>
+        <span className="tl-zoom-label">{zoom}×</span>
+        <button className="btn btn-ghost btn-sm" disabled={zoom >= 8} onClick={() => setZoom(z => Math.min(8, z + 1))} title="Zoom in">＋</button>
+      </div>
+      <div className="tl-scroll" ref={scrollRef}>
         <div
           className="tl-track"
           ref={trackRef}
-          style={{ ['--strip-w' as string]: `${frameCount * 64}px` }}
+          style={{ ['--tl-zoom' as string]: String(zoom) }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
-          {stripUrl && <img className="tl-strip" src={stripUrl} alt="" draggable={false} />}
-          {!stripUrl && <div className="tl-strip tl-strip-empty" />}
+          {stripUrl ? <img className="tl-strip" src={stripUrl} alt="" draggable={false} /> : <div className="tl-strip tl-strip-empty" />}
           {gaps.map((g, i) => (
             <div key={`gap${i}`} className={`tl-dim ${overLimit ? 'tl-over' : ''}`} style={{ left: pct(g.left), width: pct(g.width) }} />
           ))}
           {spans.map((s, i) => (
-            <div
-              key={i}
-              className={`tl-window ${overLimit ? 'tl-over' : ''}`}
-              style={{ left: pct(s.start), width: pct(s.end - s.start) }}
-            >
+            <div key={i} className={`tl-window ${overLimit ? 'tl-over' : ''}`} style={{ left: pct(s.start), width: pct(s.end - s.start) }}>
               <div className="tl-handle tl-handle-left" />
               <div className="tl-handle tl-handle-right" />
               {spans.length > 1 && (
@@ -209,12 +218,18 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, frameCoun
               )}
             </div>
           ))}
+          <div className="tl-playhead" style={{ left: pct(currentTime) }} />
+          <div className="tl-ruler">
+            {ticks.map(t => (
+              <span key={t} className="tl-tick" style={{ left: pct(t) }}>{fmt(t)}</span>
+            ))}
+          </div>
         </div>
       </div>
       <div className="tl-labels">
         <span>{(first?.start ?? 0).toFixed(2)}s</span>
         <span className={overLimit ? 'tl-span-bad' : ''}>
-          {kept.toFixed(2)}s{spans.length > 1 ? ` · ${spans.length} cuts` : ''}{overLimit ? ` — over ${maxSpan.toFixed(1)}s` : ''}
+          keeping {kept.toFixed(2)}s{spans.length > 1 ? ` · ${spans.length} cuts` : ''}{overLimit ? ` — over ${maxSpan.toFixed(1)}s` : ''}
         </span>
         <span>{duration.toFixed(2)}s</span>
       </div>

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { concatPrefix, keptSeconds, normalizeSpans, spansFromTrim } from '../src/spans.ts'
+import { concatPrefix, keptSeconds, normalizeSpans, spansFromTrim, splitAt } from '../src/spans.ts'
 
 test('one trim is one span', () => {
   assert.deepEqual(spansFromTrim(1, 3), [{ start: 1, end: 3 }])
@@ -15,6 +15,22 @@ test('spans sort, merge overlaps, and stop at 6 seconds', () => {
   )
   assert.deepEqual(spans[0], { start: 0.2, end: 1.4 })
   assert.ok(keptSeconds(spans) <= 6.01)
+})
+
+test('split at a playhead inside a span makes two ranges with a tiny gap', () => {
+  const out = splitAt([{ start: 0, end: 4 }], 2, 0.06)
+  assert.equal(out.length, 2)
+  assert.deepEqual(out[0], { start: 0, end: 2 })
+  assert.equal(out[1].start, 2.06)
+  assert.equal(out[1].end, 4)
+  // The gap must survive normalize (not re-merge) so the two pieces stay separate.
+  assert.equal(normalizeSpans(out, 8).length, 2)
+})
+
+test('split does nothing when neither half would clear the minimum', () => {
+  assert.deepEqual(splitAt([{ start: 0, end: 0.5 }], 0.25, 0.06), [{ start: 0, end: 0.5 }])
+  // A playhead in a gap leaves every span untouched.
+  assert.deepEqual(splitAt([{ start: 0, end: 1 }], 3, 0.06), [{ start: 0, end: 1 }])
 })
 
 test('two spans become a concat prefix', () => {

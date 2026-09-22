@@ -34,6 +34,21 @@ export function normalizeSpans(spans: Span[], duration: number): Span[] {
   return merged
 }
 
+/**
+ * Razor: split the span under `t` into two kept ranges separated by `gap` seconds.
+ * The gap (a frame or so) keeps the two pieces from re-merging in normalizeSpans, so
+ * the user can drag them apart to drop the middle. A span too short to leave two legal
+ * halves, or a `t` in a gap, is returned unchanged.
+ */
+export function splitAt(spans: Span[], t: number, gap = 0.06): Span[] {
+  return spans.flatMap(s => {
+    if (t > s.start + MIN_SPAN && t < s.end - MIN_SPAN - gap) {
+      return [{ start: s.start, end: t }, { start: Math.round((t + gap) * 100) / 100, end: s.end }]
+    }
+    return [s]
+  })
+}
+
 export function concatPrefix(spans: Span[]): string | null {
   if (spans.length < 2) return null
   const parts = spans.map((s, i) =>

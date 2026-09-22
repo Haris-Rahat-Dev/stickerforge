@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob } from '../api.js'
 import type { ConvertRequest, CropRect, FileRecord, FitMode, Job } from '../types.js'
 import { capFps, MAX_STICKER_SEC, motionBudget, openingTrimEnd } from '../budget.js'
-import { keptSeconds, spansFromTrim, type Span } from '../spans.js'
-import Timeline, { stripFrameCount } from './Timeline.jsx'
+import { keptSeconds, normalizeSpans, spansFromTrim, splitAt, type Span } from '../spans.js'
+import Timeline from './Timeline.jsx'
 
 function squareCrop(w: number, h: number): CropRect {
   const s = Math.min(w, h)
@@ -42,8 +42,12 @@ export default function Editor({
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<Job | null>(null)
   const [fitting, setFitting] = useState(!isImage)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [playing, setPlaying] = useState(!isImage)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const playingRef = useRef(playing)
+  playingRef.current = playing
   const scrubbing = useRef(false)
   const trimTouched = useRef(false)
   const encodeKey = `sf-encode:${file.id}`
@@ -107,6 +111,7 @@ export default function Editor({
     const v = videoRef.current
     if (!v || isImage) return
     const onTick = (): void => {
+      setCurrentTime(v.currentTime)
       if (scrubbing.current) return
       const cur = spansRef.current
       if (!cur.length) return
@@ -118,7 +123,7 @@ export default function Editor({
       if (ct >= cur[i].end - 0.03) v.currentTime = (cur[i + 1] ?? cur[0]).start
     }
     v.currentTime = spansRef.current[0]?.start ?? 0
-    v.play().catch(() => {})
+    v.play().then(() => setPlaying(true)).catch(() => {})
     v.addEventListener('timeupdate', onTick)
     return () => v.removeEventListener('timeupdate', onTick)
   }, [file.id, isImage])
@@ -129,11 +134,29 @@ export default function Editor({
     scrubbing.current = true
     v.pause()
     v.currentTime = t
+    setCurrentTime(t)
   }
 
   const endScrub = (): void => {
     scrubbing.current = false
-    videoRef.current?.play().catch(() => {})
+    if (playingRef.current) videoRef.current?.play().catch(() => {})
+  }
+
+  const togglePlay = (): void => {
+    const v = videoRef.current
+    if (!v) return
+    if (v.paused) { v.play().then(() => setPlaying(true)).catch(() => {}) }
+    else { v.pause(); setPlaying(false) }
+  }
+
+  const cutAtPlayhead = (): void => {
+    trimTouched.current = true
+    const t = currentTime
+    const inSpan = spansRef.current.some(s => t > s.start + 0.05 && t < s.end - 0.05)
+    const next = inSpan
+      ? splitAt(spansRef.current, t)
+      : [...spansRef.current, { start: t, end: Math.min(duration, t + 1) }]
+    setSpans(normalizeSpans(next, duration))
   }
 
   const first = spans[0]
@@ -176,25 +199,34 @@ export default function Editor({
   }
 
   return (
-    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="modal editor-modal">
-        <div className="modal-head">
-          <div>
-            <h2 title={file.originalName}>{file.originalName}</h2>
-            <span className="meta-line">
-              {isImage
-                ? `image · ${meta.width}×${meta.height}`
-                : pad
-                  ? `${meta.width}×${meta.height} · ${fps}fps · whole frame inside the square`
-                  : `${meta.width}×${meta.height} · ${fps}fps · drag the box to reframe`}
-            </span>
-          </div>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+    <div className="editor-screen">
+      <div className="editor-topbar">
+        <button className="btn btn-ghost btn-sm" onClick={onClose}>← Back</button>
+        <div className="editor-title">
+          <h2 title={file.originalName}>{file.originalName}</h2>
+          <span className="meta-line">
+            {isImage
+              ? `image · ${meta.width}×${meta.height}`
+              : pad
+                ? `${meta.width}×${meta.height} · ${fps}fps · whole frame inside the square`
+                : `${meta.width}×${meta.height} · ${fps}fps · drag the box to reframe`}
+          </span>
         </div>
+        <div className="editor-topbar-actions">
+          {job?.status === 'error' && <span className="error-inline" title={job.error}>{job.error}</span>}
+          <button
+            className="btn btn-primary"
+            disabled={running || (!isImage && !budget.ok)}
+            onClick={doConvert}
+          >
+            {running ? `Encoding… ${Math.round((job?.progress || 0) * 100)}%` : replaceAt != null ? 'Replace in pack' : 'Add to pack'}
+          </button>
+        </div>
+      </div>
 
-        <div className="editor-body editor-solo">
-          <div className="preview-col">
-            <div className="stage-outer" style={border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
+      <div className="editor-2col">
+        <div className="editor-preview">
+          <div className="stage-outer" style={border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
               <div className="stage">
                 {isImage
                   ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
@@ -223,21 +255,30 @@ export default function Editor({
                 title="Insets content so WhatsApp's rounded corners don't clip edge text"
               >White border</button>
             </div>
+          </div>
 
+          <div className="editor-controls">
             {!isImage && (
               <>
+                <div className="tl-transport">
+                  <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause' : 'Play'}>
+                    {playing ? '⏸' : '▶'}
+                  </button>
+                  <span className="tl-time">{currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
+                  <button className="btn btn-ghost btn-sm" onClick={cutAtPlayhead} title="Split the clip here, or keep a new range at the playhead">✂ Cut at playhead</button>
+                </div>
                 <Timeline
                   duration={duration}
                   spans={spans}
                   stripUrl={stripUrl}
                   maxSpan={maxSpan}
-                  frameCount={stripFrameCount(duration)}
+                  currentTime={currentTime}
                   onChange={onSpansChange}
-                  onScrub={seekPreview}
-                  onScrubEnd={endScrub}
+                  onSeek={seekPreview}
+                  onSeekEnd={endScrub}
                 />
                 <p className="tl-hint">
-                  Drag to trim · press a dimmed part to keep another cut{spans.length > 1 ? ' · ✕ removes one' : ''}
+                  Click the strip to move the playhead · drag a cut’s edges to trim, its body to move · ✂ cuts at the playhead{spans.length > 1 ? ' · ✕ removes a cut' : ''}
                 </p>
                 <div className={`budget ${!budget.ok || budget.tight ? 'budget-over' : ''}`}>
                   {!budget.ok
@@ -262,25 +303,18 @@ export default function Editor({
                 </div>
               </>
             )}
-
-            <button
-              className="btn btn-primary convert-btn"
-              disabled={running || (!isImage && !budget.ok)}
-              onClick={doConvert}
-            >
-              {running ? `Encoding… ${Math.round((job?.progress || 0) * 100)}%` : 'Add to pack'}
-            </button>
+            {isImage && (
+              <p className="tl-hint">Still image — it becomes a motionless sticker. Frame it on the left, then add it to the pack.</p>
+            )}
             {running && (
               <div className="encode-row">
                 <div className="progress slim"><div className="progress-fill" style={{ width: `${Math.round((job?.progress || 0) * 100)}%` }} /></div>
                 <button className="btn btn-ghost btn-sm" onClick={() => jobId && void cancelJob(jobId)}>Cancel</button>
               </div>
             )}
-            {job?.status === 'error' && <div className="error-box">{job.error}</div>}
           </div>
         </div>
       </div>
-    </div>
   )
 }
 
