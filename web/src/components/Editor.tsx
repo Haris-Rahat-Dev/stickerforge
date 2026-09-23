@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, detectCrop, fitSpan, watchJob, cancelJob, estimate } from '../api.js'
-import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, Job } from '../types.js'
-import { capFps, MAX_STICKER_SEC, motionBudget, openingTrimEnd } from '../budget.js'
-import { keptSeconds, normalizeSpans, spansFromTrim, splitAt, type Span } from '../spans.js'
+import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, estimate, discardDraft, EncodeError } from '../api.js'
+import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, StickerSpec } from '../types.js'
+import { capFps, fpsChoices, MAX_STICKER_SEC, motionBudget, nextFitLength } from '../budget.js'
+import { keptSeconds, normalizeSpans, splitAt, type Span } from '../spans.js'
 import Timeline from './Timeline.jsx'
+import StickerPreview from './StickerPreview.jsx'
+import { SpecTable } from './StickerSpec.jsx'
 
 function squareCrop(w: number, h: number): CropRect {
   const s = Math.min(w, h)
@@ -13,6 +15,25 @@ function squareCrop(w: number, h: number): CropRect {
 function squareInside(r: CropRect): CropRect {
   const s = Math.min(r.w, r.h)
   return { w: s, h: s, x: r.x + Math.round((r.w - s) / 2), y: r.y + Math.round((r.h - s) / 2) }
+}
+
+/**
+ * Short: the source frame rate, as much clip as fits. Long: 15fps, so busy footage
+ * keeps ~60–90% more seconds. Custom: the full editor, previewed after generating.
+ */
+export type EditorMode = 'short' | 'long' | 'custom'
+const LONG_FPS = 15
+/** Budget failures shrink the preset window to what the encoder measured would fit. */
+const FIT_ATTEMPTS = 4
+
+/** Identity of an encode's settings, so a result can tell when the editor has moved on. */
+const settingsKey = ({ fileId: _f, ...s }: ConvertRequest): string => JSON.stringify(s)
+
+interface Draft {
+  jobId: string
+  key: string
+  spec?: StickerSpec
+  sizeBytes?: number
 }
 
 export default function Editor({
@@ -28,34 +49,199 @@ export default function Editor({
 }) {
   const meta = file.meta
   const duration = Math.max(meta.duration, 0.5)
-  const fps = capFps(meta.fps)
+  const sourceFps = capFps(meta.fps)
+  const choices = fpsChoices(meta.fps)
   const isImage = file.kind === 'image'
   const needsFraming = Math.abs(meta.width / meta.height - 1) > 0.02
+  // A source already at or under 15fps has nothing for Long to trade.
+  const offerLong = sourceFps > LONG_FPS
 
-  const [spans, setSpans] = useState<Span[]>(() =>
-    isImage ? [{ start: 0, end: duration }] : spansFromTrim(0, openingTrimEnd(duration, meta.fps)))
+  const [mode, setMode] = useState<EditorMode>(isImage ? 'custom' : 'short')
+  const [presetStart, setPresetStart] = useState(0)
+  const [presetLen, setPresetLen] = useState(Math.min(MAX_STICKER_SEC, duration))
+  const [presetTick, setPresetTick] = useState(0)
+
+  const [spans, setSpans] = useState<Span[]>([{ start: 0, end: Math.min(MAX_STICKER_SEC, duration) }])
   const [crop, setCrop] = useState<CropRect>(() => squareCrop(meta.width, meta.height))
   const [pad, setPad] = useState(needsFraming)
   const [cropDetecting, setCropDetecting] = useState(false)
   const [border, setBorder] = useState(false)
+  const [fps, setFps] = useState(sourceFps)
+
+  const [draft, setDraft] = useState<Draft | null>(null)
+  const [busy, setBusy] = useState<{ progress: number; stage: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [showSource, setShowSource] = useState(false)
+
   const [stripUrl, setStripUrl] = useState<string | null>(null)
-  const [jobId, setJobId] = useState<string | null>(null)
-  const [job, setJob] = useState<Job | null>(null)
-  const [fitting, setFitting] = useState(!isImage)
   const [currentTime, setCurrentTime] = useState(0)
   const [playing, setPlaying] = useState(!isImage)
   const [est, setEst] = useState<EstimateResult | null>(null)
-  const [estimating, setEstimating] = useState(!isImage)
+  const [estimating, setEstimating] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const playingRef = useRef(playing)
   playingRef.current = playing
   const scrubbing = useRef(false)
-  const trimTouched = useRef(false)
-  const encodeKey = `sf-encode:${file.id}`
-  const spansRef = useRef(spans)
-  spansRef.current = spans
-  const running = job?.status === 'running'
+  // Every encode run takes a ticket; a run whose ticket is stale drops its result.
+  const runRef = useRef(0)
+  // The uncommitted draft on the server, so it can be discarded when replaced or abandoned.
+  const draftRef = useRef<string | null>(null)
+  const committedRef = useRef(false)
+  const draftKey = `sf-draft:${file.id}`
+
+  const presetFps = (m: EditorMode): number => (m === 'long' ? Math.min(LONG_FPS, sourceFps) : sourceFps)
+  const presetWindow: Span = { start: presetStart, end: Math.min(duration, presetStart + presetLen) }
+  const activeSpans = mode === 'custom' ? spans : [presetWindow]
+  const spansRef = useRef(activeSpans)
+  spansRef.current = activeSpans
+
+  const presetReq = (m: EditorMode, start: number, len: number): ConvertRequest => ({
+    fileId: file.id, start, end: start + len, spans: [{ start, end: start + len }],
+    speed: 1, fps: presetFps(m), fit: needsFraming ? 'contain' : 'cover', padColor: '#000000',
+    crop: needsFraming ? null : squareCrop(meta.width, meta.height), cropPos: 0.5, border: false,
+  })
+  const fit: FitMode = pad ? 'contain' : 'cover'
+  const customReq: ConvertRequest = {
+    fileId: file.id, start: spans[0].start, end: spans[spans.length - 1].end, spans,
+    speed: 1, fps, fit, padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
+  }
+
+  // A result is only worth adding while it still matches what the editor shows.
+  const fresh = !!draft && (mode !== 'custom' || draft.key === settingsKey(customReq))
+  const showingSticker = fresh && !showSource && !busy
+
+  const dropDraft = (): void => {
+    const id = draftRef.current
+    draftRef.current = null
+    sessionStorage.removeItem(draftKey)
+    if (id) void discardDraft(id)
+  }
+
+  // One encode for review. Resolves null when a newer run superseded it.
+  const encodeDraft = async (req: ConvertRequest, ticket: number): Promise<Draft | null> => {
+    dropDraft()
+    setDraft(null)
+    setError(null)
+    setBusy({ progress: 0, stage: 'starting' })
+    const id = await convert(req, true)
+    if (runRef.current !== ticket) { void discardDraft(id); return null }
+    draftRef.current = id
+    sessionStorage.setItem(draftKey, id)
+    try {
+      const done = await watchJob(id, e => {
+        if (runRef.current === ticket) setBusy({ progress: e.progress, stage: e.stage })
+      })
+      if (runRef.current !== ticket) return null
+      return { jobId: id, key: settingsKey(req), spec: done.spec, sizeBytes: done.sizeBytes }
+    } catch (err) {
+      // A failed encode is never persisted; nothing left to discard.
+      if (draftRef.current === id) { draftRef.current = null; sessionStorage.removeItem(draftKey) }
+      throw err
+    }
+  }
+
+  const failed = (err: unknown, ticket: number): void => {
+    if (runRef.current !== ticket) return
+    setBusy(null)
+    if (err instanceof EncodeError && err.cancelled) return
+    setError(err instanceof Error ? err.message : 'Encode failed')
+  }
+
+  const stopEncode = (): void => {
+    runRef.current++
+    dropDraft()
+    setBusy(null)
+  }
+
+  // A previous visit's unreviewed draft (reload, crash) is stale — never adopt it.
+  useEffect(() => {
+    const stale = sessionStorage.getItem(draftKey)
+    if (stale) { sessionStorage.removeItem(draftKey); void discardDraft(stale) }
+    return () => {
+      runRef.current++
+      if (!committedRef.current) {
+        const id = draftRef.current
+        draftRef.current = null
+        sessionStorage.removeItem(draftKey)
+        if (id) void discardDraft(id)
+      }
+    }
+  }, [draftKey])
+
+  // Presets encode as soon as they're picked and whenever the window is let go.
+  useEffect(() => {
+    if (isImage || mode === 'custom') return
+    const ticket = ++runRef.current
+    const m = mode
+    const start = presetStart
+    void (async () => {
+      let len = Math.max(0.5, Math.min(MAX_STICKER_SEC, duration - start))
+      for (let attempt = 1; attempt <= FIT_ATTEMPTS; attempt++) {
+        if (runRef.current !== ticket) return
+        setPresetLen(len)
+        try {
+          const d = await encodeDraft(presetReq(m, start, len), ticket)
+          if (!d) return
+          setDraft(d)
+          setBusy(null)
+          setShowSource(false)
+          return
+        } catch (err) {
+          const fitS = err instanceof EncodeError ? err.fitSeconds : undefined
+          if (runRef.current !== ticket) return
+          const next = fitS != null && attempt < FIT_ATTEMPTS
+            ? nextFitLength(len, fitS, attempt === FIT_ATTEMPTS - 1)
+            : null
+          if (next != null) {
+            len = next
+            setBusy({ progress: 0, stage: `too big — trying ${len.toFixed(1)}s` })
+            continue
+          }
+          failed(err, ticket)
+          return
+        }
+      }
+    })()
+    return () => { runRef.current++ }
+    // presetTick is the "window released" signal; presetStart alone changes mid-drag.
+  }, [mode, presetTick, file.id, isImage, duration]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const generate = async (): Promise<void> => {
+    if (!isImage && !motionBudget(keptSeconds(spans), fps).ok) return
+    const ticket = ++runRef.current
+    try {
+      const d = await encodeDraft(customReq, ticket)
+      if (!d) return
+      setDraft(d)
+      setBusy(null)
+      setShowSource(false)
+    } catch (err) {
+      failed(err, ticket)
+    }
+  }
+
+  const addToPack = (): void => {
+    if (!draft || !fresh) return
+    committedRef.current = true
+    draftRef.current = null
+    sessionStorage.removeItem(draftKey)
+    onAddedToPack?.(draft.jobId, draft.sizeBytes, replaceAt)
+  }
+
+  const pickMode = (m: EditorMode): void => {
+    if (m === mode) return
+    if (m === 'custom') {
+      // Custom opens on exactly what the preset made, so its result stays addable.
+      setSpans([presetWindow])
+      setFps(presetFps(mode))
+      setPad(needsFraming)
+      setCrop(squareCrop(meta.width, meta.height))
+      setBorder(false)
+    }
+    setError(null)
+    setMode(m)
+  }
 
   useEffect(() => {
     if (isImage) return
@@ -69,45 +255,6 @@ export default function Editor({
       if (url) URL.revokeObjectURL(url)
     }
   }, [file.id, isImage])
-
-  useEffect(() => {
-    const saved = sessionStorage.getItem(encodeKey)
-    if (!saved) return
-    setJobId(saved)
-    setJob({ status: 'running', progress: 0, stage: 'resuming', id: saved, fileId: file.id, settings: {} as ConvertRequest })
-  }, [encodeKey, file.id])
-
-  useEffect(() => {
-    if (isImage) return
-    let dead = false
-    fitSpan(file.id).then(seconds => {
-      if (dead || seconds == null) return
-      setSpans(prev => trimTouched.current ? prev : [{ start: 0, end: Math.min(duration, Math.max(0.5, seconds)) }])
-    }).finally(() => { if (!dead) setFitting(false) })
-    return () => { dead = true }
-  }, [file.id, isImage, duration])
-
-  useEffect(() => {
-    if (!jobId) return
-    const forget = (): void => { sessionStorage.removeItem(encodeKey) }
-    void watchJob(jobId, j => setJob(prev => prev ? { ...prev, progress: j.progress, stage: j.stage } : prev))
-      .then(j => {
-        forget()
-        onAddedToPack?.(jobId, j.sizeBytes, replaceAt)
-      })
-      .catch(err => {
-        forget()
-        const message = err instanceof Error ? err.message : 'failed'
-        // A cancel is a choice, not a fault — go back to idle instead of showing red.
-        if (message.toLowerCase().includes('cancel')) { setJob(null); setJobId(null); return }
-        setJob({
-          status: 'error',
-          error: message,
-          progress: 0, stage: '', id: jobId, fileId: file.id,
-          settings: {} as ConvertRequest,
-        })
-      })
-  }, [jobId, replaceAt, encodeKey, file.id])
 
   useEffect(() => {
     const v = videoRef.current
@@ -130,19 +277,23 @@ export default function Editor({
     return () => v.removeEventListener('timeupdate', onTick)
   }, [file.id, isImage])
 
-  // Live projection of the current framing/trim — drives the readout under the timeline.
-  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad })
+  // The source only plays while it is what's on screen.
   useEffect(() => {
-    if (isImage) return
+    const v = videoRef.current
+    if (!v) return
+    if (showingSticker) v.pause()
+    else if (playingRef.current) v.play().catch(() => {})
+  }, [showingSticker])
+
+  // Live projection — Custom only. Presets measure the real encode instead.
+  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps })
+  useEffect(() => {
+    if (isImage || mode !== 'custom') return
     const ctrl = new AbortController()
     let cancelled = false
     let retry: ReturnType<typeof setTimeout> | undefined
     setEstimating(true)
-    const req: ConvertRequest = {
-      fileId: file.id, start: spans[0].start, end: spans[spans.length - 1].end, spans,
-      speed: 1, fps, fit: pad ? 'contain' : 'cover', padColor: '#000000',
-      crop: pad ? null : crop, cropPos: 0.5, border,
-    }
+    const req = customReq
     const debounce = setTimeout(function go(): void {
       estimate(req, ctrl.signal)
         .then(r => {
@@ -153,12 +304,12 @@ export default function Editor({
         .catch(() => { if (!cancelled) setEstimating(false) })
     }, 450)
     return () => { cancelled = true; ctrl.abort(); clearTimeout(debounce); if (retry) clearTimeout(retry) }
-    // estKey folds in spans/crop/pad/border; fps is constant per file.
-  }, [estKey, file.id, isImage, fps]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [estKey, file.id, isImage, mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const seekPreview = (t: number): void => {
     const v = videoRef.current
     if (!v) return
+    setShowSource(true)
     scrubbing.current = true
     v.pause()
     v.currentTime = t
@@ -178,53 +329,47 @@ export default function Editor({
   }
 
   const cutAtPlayhead = (): void => {
-    trimTouched.current = true
     const t = currentTime
-    const inSpan = spansRef.current.some(s => t > s.start + 0.05 && t < s.end - 0.05)
+    const inSpan = spans.some(s => t > s.start + 0.05 && t < s.end - 0.05)
     const next = inSpan
-      ? splitAt(spansRef.current, t)
-      : [...spansRef.current, { start: t, end: Math.min(duration, t + 1) }]
+      ? splitAt(spans, t)
+      : [...spans, { start: t, end: Math.min(duration, t + 1) }]
     setSpans(normalizeSpans(next, duration))
   }
 
-  const first = spans[0]
   const outDur = keptSeconds(spans)
-  const budget = motionBudget(outDur, meta.fps)
+  const budget = motionBudget(outDur, fps)
   const maxSpan = Math.min(MAX_STICKER_SEC, duration)
-  const fit: FitMode = pad ? 'contain' : 'cover'
 
   const onSpansChange = (next: Span[]): void => {
-    trimTouched.current = true
-    setSpans(next.length ? next : spansFromTrim(0, MAX_STICKER_SEC))
+    setSpans(next.length ? next : [{ start: 0, end: Math.min(MAX_STICKER_SEC, duration) }])
+  }
+
+  const onPresetWindow = (next: Span[]): void => {
+    const s = next[0]
+    if (!s) return
+    setPresetStart(Math.max(0, Math.min(s.start, duration - presetLen)))
   }
 
   // Collapse to one span of `sec` from the first kept start — the "trim to fit" action.
   const trimTo = (sec: number): void => {
-    trimTouched.current = true
-    const from = first?.start ?? 0
-    let s = from
+    let s = spans[0]?.start ?? 0
     let e = s + sec
     if (e > duration) { e = duration; s = Math.max(0, e - sec) }
     setSpans([{ start: s, end: e }])
   }
 
-  const doConvert = async (): Promise<void> => {
-    if (!isImage && !budget.ok) return
-    trimTouched.current = true
-    setJob({ status: 'running', progress: 0, stage: 'starting', id: '', fileId: file.id, settings: {} as ConvertRequest })
-    try {
-      const id = await convert({
-        fileId: file.id,
-        start: spans[0].start, end: spans[spans.length - 1].end, spans,
-        speed: 1, fps, fit,
-        padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
-      })
-      sessionStorage.setItem(encodeKey, id)
-      setJobId(id)
-    } catch (err) {
-      setJob({ status: 'error', error: err instanceof Error ? err.message : 'failed', progress: 0, stage: '', id: '', fileId: file.id, settings: {} as ConvertRequest })
-    }
-  }
+  const primary = fresh
+    ? { label: replaceAt != null ? 'Replace in pack' : 'Add to pack', onClick: addToPack, disabled: !!busy }
+    : mode === 'custom'
+      ? { label: busy ? `Generating… ${Math.round(busy.progress * 100)}%` : 'Generate', onClick: () => void generate(), disabled: !!busy || (!isImage && !budget.ok) }
+      : { label: busy ? `Encoding… ${Math.round(busy.progress * 100)}%` : 'Add to pack', onClick: addToPack, disabled: true }
+
+  const modes: Array<{ m: EditorMode; title: string; sub: string }> = [
+    { m: 'short', title: 'Short', sub: `${sourceFps}fps · smoothest, as long as fits` },
+    ...(offerLong ? [{ m: 'long' as const, title: 'Long', sub: `${LONG_FPS}fps · up to ${MAX_STICKER_SEC}s, a bit choppier` }] : []),
+    { m: 'custom', title: 'Custom', sub: 'trim, cut, frame, fps yourself' },
+  ]
 
   return (
     <div className="editor-screen">
@@ -235,34 +380,44 @@ export default function Editor({
           <span className="meta-line">
             {isImage
               ? `image · ${meta.width}×${meta.height}`
-              : pad
-                ? `${meta.width}×${meta.height} · ${fps}fps · whole frame inside the square`
-                : `${meta.width}×${meta.height} · ${fps}fps · drag the box to reframe`}
+              : `${meta.width}×${meta.height} · ${sourceFps}fps · ${duration.toFixed(1)}s`}
           </span>
         </div>
         <div className="editor-topbar-actions">
-          {job?.status === 'error' && <span className="error-inline" title={job.error}>{job.error}</span>}
-          <button
-            className="btn btn-primary"
-            disabled={running || (!isImage && !budget.ok)}
-            onClick={doConvert}
-          >
-            {running ? `Encoding… ${Math.round((job?.progress || 0) * 100)}%` : replaceAt != null ? 'Replace in pack' : 'Add to pack'}
+          {error && <span className="error-inline" title={error}>{error}</span>}
+          <button className="btn btn-primary" disabled={primary.disabled} onClick={primary.onClick}>
+            {primary.label}
           </button>
         </div>
       </div>
 
       <div className="editor-2col">
         <div className="editor-preview">
-          <div className="stage-outer" style={border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
-              <div className="stage">
-                {isImage
-                  ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
-                  : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />}
-                {!pad && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
-              </div>
+          {fresh && !busy && (
+            <div className="seg view-toggle">
+              <button className={`seg-btn ${!showSource ? 'active' : ''}`} onClick={() => setShowSource(false)}>Sticker</button>
+              <button className={`seg-btn ${showSource ? 'active' : ''}`} onClick={() => setShowSource(true)}>Source</button>
             </div>
+          )}
+          <div className="stage-outer" style={!showingSticker && mode === 'custom' && border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
+            <div className="stage">
+              {isImage
+                ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} style={showingSticker ? { visibility: 'hidden' } : undefined} />
+                : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay style={showingSticker ? { visibility: 'hidden' } : undefined} />}
+              {mode === 'custom' && !pad && !showingSticker && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
+              {showingSticker && draft && <StickerPreview jobId={draft.jobId} className="crop-full sticker-result" />}
+              {busy && (
+                <div className="stage-status">
+                  <span>{mode === 'custom' ? 'Generating' : 'Encoding'} · {Math.round(busy.progress * 100)}%</span>
+                  <span className="stage-status-sub">{busy.stage}</span>
+                  <div className="progress slim"><div className="progress-fill" style={{ width: `${Math.round(busy.progress * 100)}%` }} /></div>
+                  <button className="btn btn-ghost btn-sm" onClick={stopEncode}>Stop</button>
+                </div>
+              )}
+            </div>
+          </div>
 
+          {mode === 'custom' && !showingSticker && (
             <div className="stage-tools">
               {needsFraming && (
                 <div className="seg">
@@ -283,18 +438,40 @@ export default function Editor({
                 title="Insets content so WhatsApp's rounded corners don't clip edge text"
               >White border</button>
             </div>
-          </div>
+          )}
+        </div>
 
-          <div className="editor-controls">
-            {!isImage && (
-              <>
-                <div className="tl-transport">
-                  <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause' : 'Play'}>
-                    {playing ? '⏸' : '▶'}
-                  </button>
-                  <span className="tl-time">{currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
+        <div className="editor-controls">
+          {!isImage && (
+            <div className="mode-picker">
+              {modes.map(({ m, title, sub }) => (
+                <button key={m} className={`mode-btn ${mode === m ? 'active' : ''}`} onClick={() => pickMode(m)}>
+                  <b>{title}</b>
+                  <span>{sub}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {fresh && draft?.spec && !busy && (
+            <div className="result-block">
+              <span className="ctl-label">This is the real sticker</span>
+              <SpecTable spec={draft.spec} />
+            </div>
+          )}
+
+          {!isImage && (
+            <>
+              <div className="tl-transport">
+                <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause' : 'Play'}>
+                  {playing ? '⏸' : '▶'}
+                </button>
+                <span className="tl-time">{currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
+                {mode === 'custom' && (
                   <button className="btn btn-ghost btn-sm" onClick={cutAtPlayhead} title="Split the clip here, or keep a new range at the playhead">✂ Cut at playhead</button>
-                </div>
+                )}
+              </div>
+              {mode === 'custom' ? (
                 <Timeline
                   duration={duration}
                   spans={spans}
@@ -305,49 +482,87 @@ export default function Editor({
                   onSeek={seekPreview}
                   onSeekEnd={endScrub}
                 />
-                <p className="tl-hint">
-                  Click the strip to move the playhead · drag a cut’s edges to trim, its body to move · ✂ cuts at the playhead{spans.length > 1 ? ' · ✕ removes a cut' : ''}
-                </p>
-                <div
-                  className={`budget est-line ${(!budget.ok || est?.fits === false || est?.quality === 'very soft') ? 'budget-over' : ''}`}
-                  data-quality={est?.fits ? est.quality : undefined}
-                >
-                  {!budget.ok
-                    ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s — trim below {MAX_STICKER_SEC}s</span>
-                    : est?.fits === false
-                    ? (
-                      <>
-                        <span>Won’t fit at {fps}fps — about {(est.maxSeconds ?? 0).toFixed(1)}s fits at this framing{pad ? '' : ' (try Fit whole)'}.</span>
-                        <button className="btn btn-sm" onClick={() => trimTo(est.maxSeconds ?? outDur)}>Trim · {(est.maxSeconds ?? 0).toFixed(1)}s</button>
-                      </>
-                    )
-                    : est?.fits
-                    ? (
-                      <span>
-                        <b>≈ {est.projectedKB}KB</b> · {outDur.toFixed(1)}s · {est.effectiveFps}fps
-                        {est.effectiveFps != null && est.effectiveFps < fps ? ` (${fps} in motion)` : ''}
-                        {' · '}<span className="est-q">{est.quality} · q{est.qNeeded}</span>
-                        {estimating ? ' · updating…' : ''}
-                      </span>
-                    )
-                    : (estimating || fitting)
-                    ? <span>Checking how this clip fits…</span>
-                    : <span>{outDur.toFixed(1)}s · {fps}fps</span>}
-                </div>
-              </>
-            )}
-            {isImage && (
-              <p className="tl-hint">Still image — it becomes a motionless sticker. Frame it on the left, then add it to the pack.</p>
-            )}
-            {running && (
-              <div className="encode-row">
-                <div className="progress slim"><div className="progress-fill" style={{ width: `${Math.round((job?.progress || 0) * 100)}%` }} /></div>
-                <button className="btn btn-ghost btn-sm" onClick={() => jobId && void cancelJob(jobId)}>Cancel</button>
+              ) : (
+                <Timeline
+                  duration={duration}
+                  spans={[presetWindow]}
+                  stripUrl={stripUrl}
+                  maxSpan={maxSpan}
+                  currentTime={currentTime}
+                  onChange={onPresetWindow}
+                  onSeek={seekPreview}
+                  onSeekEnd={endScrub}
+                  lockLength
+                  onDragEnd={() => setPresetTick(t => t + 1)}
+                />
+              )}
+              <p className="tl-hint">
+                {mode === 'custom'
+                  ? <>Click the strip to move the playhead · drag a cut’s edges to trim, its body to move · ✂ cuts at the playhead{spans.length > 1 ? ' · ✕ removes a cut' : ''}</>
+                  : <>Slide the window to pick the moment — it re-encodes when you let go. The length is whatever fits at {presetFps(mode)}fps.</>}
+              </p>
+            </>
+          )}
+
+          {mode === 'custom' && !isImage && choices.length > 1 && (
+            <div className="fps-row">
+              <span className="ctl-label">Frame rate</span>
+              <div className="seg">
+                {choices.map(f => (
+                  <button
+                    key={f}
+                    className={`seg-btn ${fps === f ? 'active' : ''}`}
+                    disabled={!!busy}
+                    onClick={() => setFps(f)}
+                  >{f}{f === sourceFps ? ' · source' : ''}</button>
+                ))}
               </div>
-            )}
-          </div>
+              <span className="fps-note">Same speed either way. Lower is choppier, but fits more seconds or a sharper picture.</span>
+            </div>
+          )}
+
+          {mode === 'custom' && !isImage && !fresh && (
+            <div
+              className={`budget est-line ${(!budget.ok || est?.fits === false || est?.quality === 'very soft') ? 'budget-over' : ''}`}
+              data-quality={est?.fits ? est.quality : undefined}
+            >
+              {!budget.ok
+                ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s — trim below {MAX_STICKER_SEC}s</span>
+                : est?.fits === false
+                ? (
+                  <>
+                    <span>Won’t fit at {fps}fps — about {(est.maxSeconds ?? 0).toFixed(1)}s fits at this framing{pad ? '' : ' (try Fit whole)'}.</span>
+                    <span className="est-actions">
+                      {fps > LONG_FPS && choices.includes(LONG_FPS) && (
+                        <button className="btn btn-sm" onClick={() => setFps(LONG_FPS)}>Try {LONG_FPS}fps</button>
+                      )}
+                      <button className="btn btn-sm" onClick={() => trimTo(est.maxSeconds ?? outDur)}>Trim · {(est.maxSeconds ?? 0).toFixed(1)}s</button>
+                    </span>
+                  </>
+                )
+                : est?.fits
+                ? (
+                  <span>
+                    estimate <b>≈ {est.projectedKB}KB</b> · {outDur.toFixed(1)}s · {est.effectiveFps}fps
+                    {' · '}<span className="est-q">{est.quality}</span>
+                    {estimating ? ' · updating…' : ''} — Generate to see the real thing
+                  </span>
+                )
+                : estimating
+                ? <span>Checking how this cut fits…</span>
+                : <span>{outDur.toFixed(1)}s · {fps}fps</span>}
+            </div>
+          )}
+
+          {isImage && !fresh && (
+            <p className="tl-hint">Still image — it becomes a motionless sticker. Frame it on the left, then Generate to see it.</p>
+          )}
+          {mode === 'custom' && draft && !fresh && !busy && (
+            <p className="tl-hint">You changed something since the last result — Generate again to see it.</p>
+          )}
         </div>
       </div>
+    </div>
   )
 }
 

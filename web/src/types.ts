@@ -108,6 +108,7 @@ export interface Job {
   outMeta?: VideoMeta | null
   trayPath?: string | null
   error?: string
+  fitSeconds?: number
 }
 
 export interface BatchJobInfo {

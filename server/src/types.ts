@@ -113,4 +113,11 @@ export interface Job {
   error?: string
   /** 1–3 emojis for the WhatsApp manifest. Absent means "not chosen yet". */
   emojis?: string[]
+  /**
+   * An editor encode still under review. Hidden from the sticker library and
+   * discardable until it joins a pack, which clears the flag.
+   */
+  draft?: boolean
+  /** On a byte-budget failure: the kept seconds the encoder measured would fit. */
+  fitSeconds?: number
 }

@@ -7,6 +7,8 @@ export interface JobEvent {
   stage: string
   sizeBytes?: number
   error?: string
+  /** Byte-budget failures only: the kept seconds that would fit at this fps. */
+  fitSeconds?: number
   /** Present once the WebP has been measured; absent while it is still encoding. */
   spec?: StickerSpec
 }

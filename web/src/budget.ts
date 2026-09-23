@@ -14,6 +14,30 @@ export function capFps(sourceFps: number): number {
   return Math.min(MAX_STICKER_FPS, n)
 }
 
+/**
+ * Frame rates the editor offers: the source rate (capped) plus 24/20/15 below it.
+ * Never above the source — upsampling a GIF only spends bytes on duplicate frames.
+ * 15 is a user choice for length or sharpness; the encoder's own ladder still stops at 24.
+ */
+export function fpsChoices(sourceFps: number): number[] {
+  const top = capFps(sourceFps)
+  return [top, 24, 20, 15].filter((f, i, all) => f <= top && all.indexOf(f) === i)
+}
+
+/**
+ * Next preset length after a byte-budget failure at `len`. The encoder's `fitSeconds`
+ * is projected from a q50 sample while the ladder can still reach q30, so it undershoots
+ * (Cat: said 3.1s, 4.2s fits) — bisect towards it. A near miss is measured at q30 and
+ * accurate, so it and the final try take the safe figure. Null when there is nothing
+ * shorter worth trying.
+ */
+export function nextFitLength(len: number, fitSeconds: number, finalTry: boolean): number | null {
+  if (!(fitSeconds < len - 0.05)) return null
+  const safe = finalTry || len - fitSeconds < 0.6
+  const next = safe ? fitSeconds - 0.1 : (fitSeconds + len) / 2
+  return Math.max(0.5, Math.floor(Math.min(next, len - 0.1) * 10) / 10)
+}
+
 export function fpsSteps(sourceFps: number): number[] {
   const top = capFps(sourceFps)
   if (top <= MIN_MOTION_FPS) return [top]

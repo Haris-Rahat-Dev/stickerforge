@@ -67,6 +67,10 @@ interface TimelineProps {
   onChange: (spans: Span[]) => void
   onSeek: (t: number) => void
   onSeekEnd?: () => void
+  /** Presets: the window slides but keeps its length — every grab is a move. */
+  lockLength?: boolean
+  /** Fired once when a window drag is released (not on plain seeks). */
+  onDragEnd?: () => void
 }
 
 interface DragState {
@@ -82,12 +86,12 @@ interface DragState {
   armed: boolean
 }
 
-export default function Timeline({ duration, spans, stripUrl, maxSpan, currentTime, onChange, onSeek, onSeekEnd }: TimelineProps) {
+export default function Timeline({ duration, spans, stripUrl, maxSpan, currentTime, onChange, onSeek, onSeekEnd, lockLength = false, onDragEnd }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
-  const live = useRef({ duration, spans, onChange, onSeek, onSeekEnd })
-  live.current = { duration, spans, onChange, onSeek, onSeekEnd }
+  const live = useRef({ duration, spans, onChange, onSeek, onSeekEnd, lockLength, onDragEnd })
+  live.current = { duration, spans, onChange, onSeek, onSeekEnd, lockLength, onDragEnd }
   const dragRef = useRef<DragState | null>(null)
 
   // Keep the playhead in view as it plays or the zoom changes.
@@ -132,7 +136,7 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, currentTi
     } else {
       const sx = d > 0 ? (cur[index].start / d) * rect.width : 0
       const ex = d > 0 ? (cur[index].end / d) * rect.width : 0
-      drag = { kind: 'window', mode: hitMode(localX, sx, ex), grabOffset: t - cur[index].start, originStart: cur[index].start, originEnd: cur[index].end, originSpans: cur, index, pointerId: e.pointerId, originX: e.clientX, armed: false }
+      drag = { kind: 'window', mode: live.current.lockLength ? 'move' : hitMode(localX, sx, ex), grabOffset: t - cur[index].start, originStart: cur[index].start, originEnd: cur[index].end, originSpans: cur, index, pointerId: e.pointerId, originX: e.clientX, armed: false }
     }
     dragRef.current = drag
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -161,6 +165,7 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, currentTi
     // A click on a window (no drag) seeks the playhead there.
     if (drag.kind === 'window' && !drag.armed) live.current.onSeek(pointTime(e.clientX))
     live.current.onSeekEnd?.()
+    if (drag.kind === 'window' && drag.armed) live.current.onDragEnd?.()
   }
 
   const removeSpan = (i: number): void => {
@@ -184,7 +189,7 @@ export default function Timeline({ duration, spans, stripUrl, maxSpan, currentTi
   for (let t = 0; t <= duration + 1e-6; t += step) ticks.push(Math.round(t * 100) / 100)
 
   return (
-    <div className="tl">
+    <div className={`tl ${lockLength ? 'tl-locked' : ''}`}>
       <div className="tl-zoom">
         <button className="btn btn-ghost btn-sm" disabled={zoom <= 1} onClick={() => setZoom(z => Math.max(1, z - 1))} title="Zoom out">−</button>
         <span className="tl-zoom-label">{zoom}×</span>

@@ -86,10 +86,14 @@ App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`,
 
 Preview **must** match the encode: square crop on the stage, trim loop, white inset. If preview and ffmpeg diverge, that’s a bug.
 
+**Modes.** The editor opens in **Short** (source fps, as long as fits) with **Long** (15fps, up to 6s; hidden when the source is ≤15fps) and **Custom** (the full timeline/crop/fps editor) beside it. Presets encode the real WebP as soon as they're picked and whenever their fixed-length window is released (`lockLength` on `Timeline`); on a byte-budget failure they refit via `nextFitLength()` in `web/src/budget.ts` — the encoder's `fitSeconds` comes from a q50 sample and undershoots, so it bisects before taking the safe figure. Custom previews only after **Generate**. Switching to Custom starts from exactly the preset's settings, so its result stays addable until something changes.
+
+**Review before commit.** Editor encodes are `draft: true` jobs: hidden from `GET /api/stickers`, discarded by `DELETE /api/job/:id` (keeps the source) when replaced, stopped, or the editor closes, and turned into real stickers by `PUT /api/packs/:code/stickers`. Boot discards drafts older than 24h that no pack holds. Cancel/discard now kills ffmpeg: `startJob` runs the task under `encodeSignal` (AsyncLocalStorage in `webp.ts`), which every spawn picks up — otherwise abandoned preset encodes held the two encode slots.
+
 - **Crop** is a square box on the full frame (drag / corner-resize). Default is the largest centered square (same as cover-center).
 - **Fit whole** — contain + letterbox so portrait/landscape memes keep the entire frame.
 - **White border** — opt-in 460px content + 26px white pad. Stops WhatsApp rounded-corners / built-in maker from clipping edge text. Off by default.
-- **FPS:** source, cap 30. Do **not** upsample GIF-sourced 10–17fps. WhatsApp WebP uses `img2webp` mixed/delta encoding: quality first (q≥70), then 24fps floor. Consecutive identical frames are held as one long frame.
+- **FPS:** source, cap 30. Do **not** upsample GIF-sourced 10–17fps. WhatsApp WebP uses `img2webp` mixed/delta encoding: quality first (q≥70), then 24fps floor. Consecutive identical frames are held as one long frame. The 24 floor is the encoder's automatic ladder only: the editor's **Frame rate** control (`fpsChoices()` in `web/src/budget.ts`) lets the user pick source/24/20/15 — never above source — trading smoothness for seconds or sharpness. Busy 30fps footage fits ~2.5–4.5s at 24; 15fps buys roughly 60–90% more (measured: smol_silly_cat 2.5s→4.8s).
 - **Budget:** Add allows up to 6s. All-motion estimate (~4s at 30fps) is a warning with a safer-trim button; holds can still make a longer cut fit. Encoder fails closed if it will not.
 - Bitrate: `computeBitrateKbps` targets ~470KB for the WebM; WebP is encoded from the **original** at Add (cached) so pack build is a copy.
 - Staging shelf rehydrates from `GET /api/files` when a pack opens — reload does not drop uncommitted uploads.

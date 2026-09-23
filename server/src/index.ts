@@ -7,7 +7,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { extractTray, buildFilters } from './convert.js'
-import { convertToAnimatedWebp, estimateSticker, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, type WebpResult } from './webp.js'
+import { convertToAnimatedWebp, encodeSignal, estimateSticker, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, WebpBudgetError, type WebpResult } from './webp.js'
 import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd, secondsThatFit } from './budget.js'
 import { keptSeconds, normalizeSpans, type Span } from './spans.js'
 import { createLimiter } from './queue.js'
@@ -51,6 +51,7 @@ const publishJob = (job: Job): void => publish({
   sizeBytes: job.webpBytes ?? job.sizeBytes,
   spec: job.spec,
   error: job.error,
+  fitSeconds: job.fitSeconds,
 })
 
 // Safety net: a stray rejected promise (e.g. an ffmpeg failure in an async route)
@@ -120,6 +121,17 @@ for (const job of loadJobs()) {
   if (fs.existsSync(job.outputPath)) jobs.set(job.id, job)
   else missingJobs.push(job.outputPath)
 }
+// Drafts the user never took into a pack (tab closed mid-review). A day's grace so a
+// restart doesn't yank one someone is looking at right now.
+const DRAFT_TTL_MS = 24 * 60 * 60 * 1000
+let staleDrafts = 0
+for (const job of [...jobs.values()]) {
+  if (job.draft && Date.now() - job.startedAt > DRAFT_TTL_MS && countPacksWithJob(job.id) === 0) {
+    discardSticker(job.id)
+    staleDrafts++
+  }
+}
+if (staleDrafts) console.log(`boot: discarded ${staleDrafts} unreviewed draft encode(s)`)
 if (missingFiles.length || missingJobs.length) {
   // A drop here means lost work, so it must never be silent: an unusable stored path
   // and a deliberately-deleted source look the same from here.
@@ -362,7 +374,7 @@ app.get('/api/fit-span/:id', ah(async (req, res) => {
   }
 }))
 
-function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null, controller?: AbortController): Job {
+function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null, controller?: AbortController, draft = false): Job {
   const jobId = crypto.randomUUID()
   // WhatsApp ships the WebP. Images and videos both stop there — a following
   // two-pass VP9 WebM was a second full encode the pack never reads.
@@ -379,7 +391,8 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     stage: 'analyzing',
     outputPath,
     settings,
-    startedAt: Date.now()
+    startedAt: Date.now(),
+    ...(draft ? { draft: true } : {}),
   }
   jobs.set(jobId, job)
   if (signal) jobAbort.set(jobId, controller ?? new AbortController())
@@ -412,7 +425,17 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
       }
 
   job.stage = 'queued'
-  encodeQueue.run(task).then(async result => {
+  // Run under the job's signal so a cancel/discard kills its child processes, and a
+  // job cancelled while still queued fails at its first spawn instead of encoding.
+  const abortable = signal ? () => encodeSignal.run(signal, task) : task
+  encodeQueue.run(abortable).then(async result => {
+    // Cancel/discard doesn't reach into ffmpeg, so the encode can still finish after
+    // the user has walked away from it. Never resurrect it as a done sticker.
+    if (job.status === 'cancelled') {
+      fs.rmSync(outputPath, { force: true })
+      fs.rmSync(webpCachePath(jobId), { force: true })
+      return
+    }
     const trayPath = path.join(TRAYS, `${jobId}.png`)
     await extractTray(rec.path, trayPath, start, crop, cropPos)
     job.trayPath = fs.existsSync(trayPath) ? trayPath : null
@@ -442,6 +465,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     } else {
       job.status = 'error'
       job.error = err instanceof Error ? err.message : 'Conversion failed'
+      if (err instanceof WebpBudgetError) job.fitSeconds = err.maxSeconds
       // Encode failures otherwise vanish into the client SSE with no server record.
       // Log enough to tell a legitimate byte-budget fail-closed from a real crash.
       const kept = keptSeconds(spans)
@@ -464,7 +488,8 @@ app.post('/api/convert', (req, res) => {
   if (!rec) { res.status(404).json({ error: 'File not found' }); return }
   const settings = parseSettings(req.body, rec)
   const controller = new AbortController()
-  const job = startJob(rec, settings, controller.signal)
+  // The editor encodes for review first; the sticker only becomes real when it joins a pack.
+  const job = startJob(rec, settings, controller.signal, controller, req.body.draft === true)
   res.json({ jobId: job.id })
 })
 
@@ -531,6 +556,27 @@ app.post('/api/job/:id/cancel', (req, res) => {
   job.error = 'Cancelled'
   publishJob(job)
   res.json({ ok: true, status: job.status })
+})
+
+// Throw away an encode the user reviewed and rejected. Only drafts that no pack holds —
+// a real sticker goes through DELETE /api/sticker/:jobId. The source stays: the user
+// is still editing it.
+app.delete('/api/job/:id', (req, res) => {
+  const job = ownedJob(req, req.params.id)
+  if (!job) { res.json({ ok: true }); return }
+  if (!job.draft || countPacksWithJob(job.id) > 0) {
+    res.status(409).json({ error: 'Not a draft — delete the sticker instead' })
+    return
+  }
+  if (job.status === 'running') {
+    jobAbort.get(job.id)?.abort()
+    jobAbort.delete(job.id)
+    job.status = 'cancelled'
+    job.error = 'Discarded'
+    publishJob(job)
+  }
+  discardSticker(job.id)
+  res.json({ ok: true })
 })
 
 app.get('/api/download/webm/:jobId', (req, res) => {
@@ -722,7 +768,7 @@ app.get('/api/packs', (req, res) => {
 
 app.get('/api/stickers', (req, res) => {
   const mine = [...jobs.values()]
-    .filter(j => j.owner === req.userId && j.status === 'done')
+    .filter(j => j.owner === req.userId && j.status === 'done' && !j.draft)
     .sort((a, b) => b.startedAt - a.startedAt)
     .map(j => stickerView(j, files.get(j.fileId)))
   res.json(mine)
@@ -798,6 +844,11 @@ app.put('/api/packs/:code/stickers', (req, res) => {
     return
   }
   setPackStickers(pack.code, jobIds)
+  // Joining a pack is what turns a reviewed draft into a library sticker.
+  for (const id of jobIds) {
+    const j = jobs.get(id)
+    if (j?.draft) { delete j.draft; saveJob(j) }
+  }
   res.json(packSummary({ ...pack, jobIds }))
 })
 

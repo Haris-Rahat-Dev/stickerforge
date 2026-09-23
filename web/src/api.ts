@@ -70,11 +70,12 @@ export async function detectCrop(id: string): Promise<CropRect | null> {
   return res.json()
 }
 
-export async function convert(settings: ConvertRequest): Promise<string> {
+/** `draft` encodes for review: hidden from the library until it joins a pack. */
+export async function convert(settings: ConvertRequest, draft = false): Promise<string> {
   const res = await apiFetch(`${BASE}/api/convert`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings)
+    body: JSON.stringify({ ...settings, draft })
   })
   const json = await res.json()
   if (!res.ok) throw new Error(json.error || 'Convert failed')
@@ -200,6 +201,11 @@ export async function getJob(jobId: string): Promise<Job> {
 }
 
 /** Stop a running encode and release its queue slot. */
+/** Drop a rejected review encode (running or done). The source file is kept. */
+export async function discardDraft(jobId: string): Promise<void> {
+  await apiFetch(`${BASE}/api/job/${jobId}`, { method: 'DELETE' }).catch(() => {})
+}
+
 export async function cancelJob(jobId: string): Promise<void> {
   await apiFetch(`${BASE}/api/job/${jobId}/cancel`, { method: 'POST' })
 }
@@ -232,6 +238,8 @@ export interface JobEvent {
   stage: string
   sizeBytes?: number
   error?: string
+  /** Byte-budget failures only: the kept seconds that would fit at this fps. */
+  fitSeconds?: number
   /** Measured properties of the finished WebP; absent until the encode is verified. */
   spec?: StickerSpec
 }
@@ -254,6 +262,17 @@ export async function setStickerEmojis(jobId: string, emojis: string[]): Promise
 export const listStickers = (): Promise<StickerView[]> =>
   apiFetch(`${BASE}/api/stickers`).then(r => r.json())
 
+/** A failed/cancelled encode. `fitSeconds` is set when it failed only on the byte budget. */
+export class EncodeError extends Error {
+  readonly fitSeconds?: number
+  readonly cancelled: boolean
+  constructor(e: JobEvent) {
+    super(e.error || 'Encode failed')
+    this.fitSeconds = e.fitSeconds
+    this.cancelled = e.status === 'cancelled'
+  }
+}
+
 export async function watchJob(jobId: string, on: (e: JobEvent) => void): Promise<JobEvent> {
   const q = await freshTokenQuery()
   return new Promise<JobEvent>((resolve, reject) => {
@@ -267,7 +286,7 @@ export async function watchJob(jobId: string, on: (e: JobEvent) => void): Promis
         if (e.status === 'running') return
         settled = true
         es.close()
-        e.status === 'done' ? resolve(e) : reject(new Error(e.error || 'Encode failed'))
+        e.status === 'done' ? resolve(e) : reject(new EncodeError(e))
       } catch (err) {
         if (settled) return
         settled = true
@@ -296,10 +315,11 @@ async function pollJobUntilDone(jobId: string, on: (e: JobEvent) => void): Promi
       sizeBytes: j.webpBytes ?? j.sizeBytes,
       spec: j.spec,
       error: j.error,
+      fitSeconds: j.fitSeconds,
     }
     on(e)
     if (e.status === 'done') return e
-    if (e.status !== 'running') throw new Error(e.error || 'Encode failed')
+    if (e.status !== 'running') throw new EncodeError(e)
     await new Promise(r => setTimeout(r, 600))
   }
 }

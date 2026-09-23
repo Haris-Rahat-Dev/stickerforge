@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -6,6 +7,17 @@ import { buildFilters } from './convert.js'
 import { estimatedBytes, firstMuxNeverFits, fpsSteps, MAX_STICKER_SEC, planSpan, projectAnimatedBytes, projectedNeverFits, secondsThatFit, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
 import { concatPrefix, keptSeconds, type Span } from './spans.js'
 import type { ConvertSettings } from './types.js'
+
+/**
+ * The running encode's abort signal, ambient so every ffmpeg/cwebp/img2webp spawned
+ * under it is killed on cancel — without threading a signal through each helper.
+ * Discarded preset encodes otherwise run to completion and hold an encode slot.
+ */
+export const encodeSignal = new AsyncLocalStorage<AbortSignal>()
+const spawnOpts = (): { signal?: AbortSignal } => {
+  const signal = encodeSignal.getStore()
+  return signal ? { signal } : {}
+}
 
 export type WebpOptions = Omit<ConvertSettings, 'speed' | 'spans'> & {
   inputPath: string
@@ -73,7 +85,7 @@ async function frameSsim(referencePng: string, outPath: string, tmp: string): Pr
 
 async function capture(bin: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, args)
+    const p = spawn(bin, args, spawnOpts())
     let out = ''
     let err = ''
     p.stdout.on('data', d => { out += d })
@@ -119,7 +131,7 @@ export class WebpBudgetError extends Error {
 
 function run(bin: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, args)
+    const p = spawn(bin, args, spawnOpts())
     let err = ''
     p.stderr.on('data', d => { err += d.toString() })
     p.on('close', code => code === 0 ? resolve() : reject(new Error(`${bin} exited ${code}: ${err.slice(-400)}`)))
@@ -555,7 +567,7 @@ function runWithProgress(
   totalSec: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, args)
+    const p = spawn(bin, args, spawnOpts())
     let err = ''
     let buf = ''
     p.stderr.on('data', d => { err += d.toString() })
