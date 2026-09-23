@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, estimate, discardDraft, EncodeError } from '../api.js'
+import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, estimate, discardDraft, EncodeError, planSeams, type SeamLabel, type SeamPlan } from '../api.js'
 import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, StickerSpec } from '../types.js'
 import { capFps, fpsChoices, MAX_STICKER_SEC, motionBudget, nextFitLength } from '../budget.js'
 import { keptSeconds, normalizeSpans, splitAt, type Span } from '../spans.js'
@@ -80,6 +80,12 @@ export default function Editor({
   const stickerT0 = useRef(0)
   const [playing, setPlaying] = useState(!isImage)
   const [est, setEst] = useState<EstimateResult | null>(null)
+  // The last Best-loop answer, tied to the cuts it was computed for.
+  // Live seam scores for the markers (Custom), and the last Smooth-seams result for the
+  // note — both tied to the exact cuts they were computed for.
+  const [seamLive, setSeamLive] = useState<(SeamPlan & { key: string }) | null>(null)
+  const [seamNote, setSeamNote] = useState<(SeamPlan & { key: string; delta: number; single: boolean }) | null>(null)
+  const [smoothing, setSmoothing] = useState(false)
   const [estimating, setEstimating] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -434,6 +440,70 @@ export default function Editor({
     setSpans([{ start: s, end: e }])
   }
 
+  // Smooth seams: snap every join — each cut between pieces and the loop back to the
+  // start — or just seam `only`. Cuts may grow the sticker (reported), the loop only
+  // trims. Presets hand over to Custom, where cuts can move.
+  const spansKey = JSON.stringify(spans)
+  const seamReqKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps })
+  const smoothSeams = async (only?: number): Promise<void> => {
+    // A preset encode is abandoned anyway when this hands over to Custom (pickMode stops it).
+    if (isImage || smoothing || (busy && mode === 'custom')) return
+    const req = mode === 'custom' ? customReq : presetReq(mode, presetStart, presetLen)
+    const base = mode === 'custom' ? spans : [presetWindow]
+    if (mode !== 'custom') pickMode('custom')
+    setSmoothing(true)
+    try {
+      let r = await planSeams(req, only)
+      for (let i = 0; r.busy && i < 8; i++) {
+        await new Promise(res => setTimeout(res, 300))
+        r = await planSeams(req, only)
+      }
+      if (r.busy || r.unknown) { setError('Could not analyse the seams — try again'); return }
+      setSpans(r.spans)
+      setSeamNote({ ...r, key: JSON.stringify(r.spans), delta: keptSeconds(r.spans) - keptSeconds(base), single: only != null })
+    } catch {
+      setError('Could not analyse the seams — try again')
+    } finally {
+      setSmoothing(false)
+    }
+  }
+  // End a piece before the black it runs into (or start it after).
+  const fixBlank = (piece: number, kind: 'ends-blank' | 'starts-blank', at: number): void => {
+    setSpans(normalizeSpans(spans.map((s, i) => i !== piece ? s
+      : kind === 'ends-blank' ? { start: s.start, end: at } : { start: at, end: s.end }), duration))
+  }
+
+  // Live seam scores while editing in Custom, for the markers on the timeline.
+  useEffect(() => {
+    if (isImage || mode !== 'custom') return
+    const ctrl = new AbortController()
+    const req = customReq
+    const key = seamReqKey
+    const t = setTimeout(() => {
+      planSeams(req, -1, ctrl.signal)   // -1 = score only, snap nothing
+        .then(r => { if (!r.busy && !r.unknown) setSeamLive({ ...r, key }) })
+        .catch(() => {})
+    }, 500)
+    return () => { clearTimeout(t); ctrl.abort() }
+  }, [seamReqKey, mode, isImage]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const SEAM_TEXT: Record<SeamLabel, string> = {
+    seamless: 'seamless', smooth: 'smooth', noticeable: 'noticeable', jump: 'jump', hard: 'hard jump', shot: 'shot change',
+  }
+  const live = seamLive && seamLive.key === seamReqKey ? seamLive : null
+  const note = seamNote && seamNote.key === spansKey ? seamNote : null
+  const seamMarkers = mode === 'custom' && live
+    ? live.seams.map(sm => ({
+      at: sm.end,
+      kind: sm.kind,
+      label: sm.label,
+      title: `${sm.kind === 'loop' ? 'Loop' : `Cut ${sm.index + 1}`} ${sm.end.toFixed(2)}s → ${sm.start.toFixed(2)}s: ${SEAM_TEXT[sm.label]}`
+        + (sm.best.changed ? ` — click to snap (→ ${SEAM_TEXT[sm.best.label]})` : ' — nothing in reach is smoother'),
+      onClick: sm.best.changed ? () => void smoothSeams(sm.index) : undefined,
+    }))
+    : []
+  const warnings = (note ?? live)?.warnings ?? []
+
   const primary = fresh
     ? { label: replaceAt != null ? 'Replace in pack' : 'Add to pack', onClick: addToPack, disabled: !!busy }
     : mode === 'custom'
@@ -466,8 +536,8 @@ export default function Editor({
         </div>
       </div>
 
-      <div className="editor-2col">
-        <div className="editor-preview">
+      <div className="editor-body">
+        <section className="editor-stage-row">
           {fresh && !busy && (
             <div className="seg view-toggle">
               <button className={`seg-btn ${!showSource ? 'active' : ''}`} onClick={() => setShowSource(false)}>Sticker</button>
@@ -477,7 +547,7 @@ export default function Editor({
           <div className="stage-outer" style={!showingSticker && mode === 'custom' && border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
             <div className="stage">
               {isImage
-                ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} style={showingSticker ? { visibility: 'hidden' } : undefined} />
+                ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
                 : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />}
               {mode === 'custom' && !pad && !showingSticker && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
               {showingSticker && draft && (
@@ -521,9 +591,110 @@ export default function Editor({
               >White border</button>
             </div>
           )}
-        </div>
+        </section>
 
-        <div className="editor-controls">
+        {!isImage && (
+          <section className="editor-timeline-row">
+            <div className="tl-transport">
+              {showingSticker ? (
+                <span className="tl-following-note">
+                  ● STICKER LOOP · {stickerOut.toFixed(1)}s / {stickerDur.toFixed(1)}s — green playhead = where it is in the source
+                </span>
+              ) : (
+                <>
+                  <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause (space)' : 'Play (space)'}>
+                    {playing ? '⏸' : '▶'}
+                  </button>
+                  <button className="btn btn-ghost btn-sm tl-step" onClick={() => stepFrame(-1)} title="Previous frame (←)">‹</button>
+                  <button className="btn btn-ghost btn-sm tl-step" onClick={() => stepFrame(1)} title="Next frame (→)">›</button>
+                  <span className="tl-time">{clock(currentTime, duration >= 60)} <small>/ {clock(duration, duration >= 60)}</small></span>
+                </>
+              )}
+              {mode === 'custom' && !showingSticker && (
+                <>
+                  <button className="btn btn-ghost btn-sm" onClick={() => markAt('in')} title="Set the cut's start here (I)">[ In</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => markAt('out')} title="Set the cut's end here (O)">Out ]</button>
+                  <button className="btn btn-ghost btn-sm" onClick={cutAtPlayhead} title="Split the cut here, or add a new one at the playhead (C)">✂ Cut</button>
+                </>
+              )}
+              <button
+                className="btn btn-ghost btn-sm tl-loop-btn"
+                disabled={smoothing || (!!busy && mode === 'custom')}
+                onClick={() => void smoothSeams()}
+                title="Move each cut, and the loop back to the start, to where the footage joins most smoothly. The loop only trims; cuts may lengthen the sticker a little."
+              >{smoothing ? 'Checking seams…' : '∞ Smooth seams'}</button>
+            </div>
+            {mode === 'custom' ? (
+              <Timeline
+                duration={duration}
+                spans={spans}
+                stripUrl={stripUrl}
+                aspect={meta.width / meta.height}
+                maxSpan={maxSpan}
+                currentTime={playheadTime}
+                playhead={showingSticker ? 'sticker' : 'source'}
+                seams={seamMarkers}
+                onChange={onSpansChange}
+                onSeek={seekPreview}
+                onSeekEnd={endScrub}
+              />
+            ) : (
+              <Timeline
+                duration={duration}
+                spans={[presetWindow]}
+                stripUrl={stripUrl}
+                aspect={meta.width / meta.height}
+                maxSpan={maxSpan}
+                currentTime={playheadTime}
+                playhead={showingSticker ? 'sticker' : 'source'}
+                onChange={onPresetWindow}
+                onSeek={seekPreview}
+                onSeekEnd={endScrub}
+                lockLength
+                onDragEnd={() => setPresetTick(t => t + 1)}
+              />
+            )}
+            {note && (
+              <div className="seam-note">
+                {note.seams.filter(sm => !note.single || sm.applied).map(sm => (
+                  <p key={sm.index} className={`seam-line seam-${sm.applied ? sm.best.label : sm.label}`}>
+                    <b>{sm.kind === 'loop' ? 'LOOP' : `CUT ${sm.index + 1}`}</b>{' '}
+                    {sm.applied
+                      ? <>{SEAM_TEXT[sm.label]} → <strong>{SEAM_TEXT[sm.best.label]}</strong></>
+                      : sm.label === 'shot'
+                        ? <><strong>shot change</strong> — kept; a clean cut between shots reads as an edit</>
+                        : sm.label === 'seamless' || sm.label === 'smooth'
+                          ? <>already <strong>{SEAM_TEXT[sm.label]}</strong></>
+                          : <><strong>{SEAM_TEXT[sm.label]}</strong> — nothing within reach is smoother; these moments never line up</>}
+                  </p>
+                ))}
+                <p className="seam-line seam-sum">
+                  {note.seams.some(sm => sm.applied)
+                    ? <>{note.delta > 0.005 ? `+${note.delta.toFixed(2)}s longer — check the size estimate` : note.delta < -0.005 ? `trimmed ${(-note.delta).toFixed(2)}s` : 'same length'}{fresh ? '' : ' · Generate to see it'}</>
+                    : 'no changes'}
+                </p>
+              </div>
+            )}
+            {warnings.map(w => (
+              <p key={`${w.piece}-${w.kind}`} className="seam-line seam-warn">
+                <b>{spans.length > 1 ? `PIECE ${w.piece + 1}` : 'CLIP'}</b>{' '}
+                {w.kind === 'ends-blank' ? <>runs into black at {w.at.toFixed(2)}s — the loop jumps out of it</> : <>starts on black until {w.at.toFixed(2)}s</>}
+                {mode === 'custom' && (
+                  <button className="btn btn-sm" onClick={() => fixBlank(w.piece, w.kind, w.at)}>
+                    {w.kind === 'ends-blank' ? `End at ${w.at.toFixed(2)}s` : `Start at ${w.at.toFixed(2)}s`}
+                  </button>
+                )}
+              </p>
+            ))}
+            <p className="tl-hint">
+              {mode === 'custom'
+                ? <>Drag a cut’s handles to trim, its body to move · click or drag the ruler to scrub · space play · ←/→ frame · I/O set in/out · C cut{spans.length > 1 ? ' · ✕ removes a cut' : ''} · ⌘/Ctrl-scroll to zoom</>
+                : <>Slide the window to pick the moment — it re-encodes when you let go. The length is whatever fits at {presetFps(mode)}fps. Space play · ←/→ frame.</>}
+            </p>
+          </section>
+        )}
+
+        <section className="editor-config-row">
           {!isImage && (
             <div className="mode-picker">
               {modes.map(({ m, title, sub }) => (
@@ -540,68 +711,6 @@ export default function Editor({
               <span className="ctl-label">This is the real sticker</span>
               <SpecTable spec={draft.spec} />
             </div>
-          )}
-
-          {!isImage && (
-            <>
-              <div className="tl-transport">
-                {showingSticker ? (
-                  <span className="tl-following-note">
-                    ● STICKER LOOP · {stickerOut.toFixed(1)}s / {stickerDur.toFixed(1)}s — green playhead = where it is in the source
-                  </span>
-                ) : (
-                  <>
-                    <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause (space)' : 'Play (space)'}>
-                      {playing ? '⏸' : '▶'}
-                    </button>
-                    <button className="btn btn-ghost btn-sm tl-step" onClick={() => stepFrame(-1)} title="Previous frame (←)">‹</button>
-                    <button className="btn btn-ghost btn-sm tl-step" onClick={() => stepFrame(1)} title="Next frame (→)">›</button>
-                    <span className="tl-time">{clock(currentTime, duration >= 60)} <small>/ {clock(duration, duration >= 60)}</small></span>
-                  </>
-                )}
-                {mode === 'custom' && !showingSticker && (
-                  <>
-                    <button className="btn btn-ghost btn-sm" onClick={() => markAt('in')} title="Set the cut's start here (I)">[ In</button>
-                    <button className="btn btn-ghost btn-sm" onClick={() => markAt('out')} title="Set the cut's end here (O)">Out ]</button>
-                    <button className="btn btn-ghost btn-sm" onClick={cutAtPlayhead} title="Split the cut here, or add a new one at the playhead (C)">✂ Cut</button>
-                  </>
-                )}
-              </div>
-              {mode === 'custom' ? (
-                <Timeline
-                  duration={duration}
-                  spans={spans}
-                  stripUrl={stripUrl}
-                  aspect={meta.width / meta.height}
-                  maxSpan={maxSpan}
-                  currentTime={playheadTime}
-                  playhead={showingSticker ? 'sticker' : 'source'}
-                  onChange={onSpansChange}
-                  onSeek={seekPreview}
-                  onSeekEnd={endScrub}
-                />
-              ) : (
-                <Timeline
-                  duration={duration}
-                  spans={[presetWindow]}
-                  stripUrl={stripUrl}
-                  aspect={meta.width / meta.height}
-                  maxSpan={maxSpan}
-                  currentTime={playheadTime}
-                  playhead={showingSticker ? 'sticker' : 'source'}
-                  onChange={onPresetWindow}
-                  onSeek={seekPreview}
-                  onSeekEnd={endScrub}
-                  lockLength
-                  onDragEnd={() => setPresetTick(t => t + 1)}
-                />
-              )}
-              <p className="tl-hint">
-                {mode === 'custom'
-                  ? <>Drag a cut’s handles to trim, its body to move · click or drag the ruler to scrub · space play · ←/→ frame · I/O set in/out · C cut{spans.length > 1 ? ' · ✕ removes a cut' : ''} · ⌘/Ctrl-scroll to zoom</>
-                  : <>Slide the window to pick the moment — it re-encodes when you let go. The length is whatever fits at {presetFps(mode)}fps. Space play · ←/→ frame.</>}
-              </p>
-            </>
           )}
 
           {mode === 'custom' && !isImage && choices.length > 1 && (
@@ -655,12 +764,12 @@ export default function Editor({
           )}
 
           {isImage && !fresh && (
-            <p className="tl-hint">Still image — it becomes a motionless sticker. Frame it on the left, then Generate to see it.</p>
+            <p className="tl-hint">Still image — it becomes a motionless sticker. Frame it above, then Generate to see it.</p>
           )}
           {mode === 'custom' && draft && !fresh && !busy && (
             <p className="tl-hint">You changed something since the last result — Generate again to see it.</p>
           )}
-        </div>
+        </section>
       </div>
     </div>
   )

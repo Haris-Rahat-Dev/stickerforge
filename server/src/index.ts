@@ -12,6 +12,7 @@ import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTri
 import { keptSeconds, normalizeSpans, type Span } from './spans.js'
 import { createLimiter } from './queue.js'
 import { reapOrphans } from './reap.js'
+import { planSeams } from './seams.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
   createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion,
   countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
@@ -517,6 +518,33 @@ app.post('/api/estimate', ah(async (req, res) => {
     res.json({ unknown: true })   // never block the editor on a projection failure
   } finally {
     estimating.delete(req.userId)
+  }
+}))
+
+// Smooth seams: score every join — each cut between pieces and the loop back to the
+// start — and move its ends to the smoothest join in reach (`only` = one seam). Cuts
+// may grow the kept total up to 6s; the loop only trims. Also flags pieces that run
+// into black. Cheap: one cached 16×16 pass over the clip plus small windows per seam.
+const seamProbing = new Set<string>()
+app.post('/api/seams', ah(async (req, res) => {
+  const rec = ownedFile(req, String(req.body.fileId || ''))
+  if (!rec) { res.status(404).json({ error: 'File not found' }); return }
+  if (rec.kind === 'image') { res.status(400).json({ error: 'A still image has no seams' }); return }
+  if (seamProbing.has(req.userId)) { res.json({ busy: true }); return }
+  seamProbing.add(req.userId)
+  try {
+    const s = parseSettings(req.body, rec)
+    const spans = s.spans.length ? s.spans : [{ start: s.start, end: s.end }]
+    const only = Number.isInteger(req.body.only) ? Number(req.body.only) : null
+    const cropF = s.crop ? `crop=${s.crop.w}:${s.crop.h}:${s.crop.x}:${s.crop.y},` : ''
+    res.json(await planSeams({
+      inputPath: rec.path, spans, duration: rec.meta.duration, fps: s.fps, only,
+      preVf: cropF + buildFilters(s.fit, s.padColor, s.cropPos, s.border),
+    }))
+  } catch {
+    res.json({ unknown: true })   // a failed probe must never block editing
+  } finally {
+    seamProbing.delete(req.userId)
   }
 }))
 

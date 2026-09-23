@@ -1,5 +1,6 @@
 import type { BatchJobInfo, ConvertRequest, CropRect, EstimateResult, FileRecord, Job, StickerSpec, StickerView } from './types.js'
 import { authHeader, tokenQuery, freshTokenQuery } from './auth.js'
+import type { Span } from './spans.js'
 
 const BASE = ''
 
@@ -91,6 +92,43 @@ export async function estimate(settings: ConvertRequest, signal?: AbortSignal): 
   })
   if (!res.ok) throw new Error('Estimate failed')
   return res.json() as Promise<EstimateResult>
+}
+
+export type SeamLabel = 'seamless' | 'smooth' | 'noticeable' | 'jump' | 'hard' | 'shot'
+export interface SeamReport {
+  index: number
+  kind: 'cut' | 'loop'
+  end: number
+  start: number
+  label: SeamLabel
+  cost: number | null
+  best: { end: number; start: number; label: SeamLabel; cost: number; changed: boolean; grew: number }
+  applied: boolean
+}
+export interface SeamWarning { piece: number; kind: 'ends-blank' | 'starts-blank'; at: number }
+export interface SeamPlan {
+  seams: SeamReport[]
+  spans: Span[]
+  grew: number
+  typical: number
+  warnings: SeamWarning[]
+  busy?: boolean
+  unknown?: boolean
+}
+
+/**
+ * Score every join (cuts between pieces + the loop) and return the cuts with them
+ * snapped — all of them, or just seam `only`.
+ */
+export async function planSeams(settings: ConvertRequest, only?: number, signal?: AbortSignal): Promise<SeamPlan> {
+  const res = await apiFetch(`${BASE}/api/seams`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(only == null ? settings : { ...settings, only }),
+    signal,
+  })
+  if (!res.ok) throw new Error('Seam analysis failed')
+  return res.json() as Promise<SeamPlan>
 }
 
 export async function quickConvert(fileId: string): Promise<string> {

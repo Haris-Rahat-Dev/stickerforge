@@ -121,6 +121,8 @@ interface TimelineProps {
   onDragEnd?: () => void
   /** 'sticker': the playhead is following the encoded sticker's loop, not the source. */
   playhead?: 'source' | 'sticker'
+  /** One marker per join (cut or loop), coloured by how visible it is; click to snap. */
+  seams?: Array<{ at: number; kind: 'cut' | 'loop'; label: string; title: string; onClick?: () => void }>
 }
 
 interface DragState {
@@ -138,7 +140,7 @@ interface DragState {
 
 export default function Timeline({
   duration, spans, stripUrl, aspect, maxSpan, currentTime, onChange, onSeek, onSeekEnd,
-  lockLength = false, onDragEnd, playhead = 'source',
+  lockLength = false, onDragEnd, playhead = 'source', seams = [],
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -335,6 +337,19 @@ export default function Timeline({
               </div>
             ))}
           </div>
+
+          {seams.map(sm => (
+            <button
+              key={`${sm.kind}-${sm.at}`}
+              type="button"
+              className={`tl-seam tl-seam-${sm.label} ${sm.kind === 'loop' ? 'tl-seam-loop' : ''} ${sm.onClick ? '' : 'tl-seam-idle'}`}
+              style={{ left: pct(sm.at) }}
+              title={sm.title}
+              aria-label={sm.title}
+              onPointerDown={e => { e.stopPropagation(); e.preventDefault() }}
+              onClick={e => { e.stopPropagation(); sm.onClick?.() }}
+            >{sm.kind === 'loop' ? '↺' : ''}</button>
+          ))}
 
           <div className="tl-playhead" style={{ left: pct(currentTime) }}>
             <span className="tl-playhead-cap" />
