@@ -1,0 +1,64 @@
+<svg width="100%" viewBox="0 0 680 654" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>StickerForge encode stage</title>
+<desc>Inside the encode: kept ranges, pick frame rate, extract 512px frames, merge holds, mux WebP down a quality ladder, then a size check that either ships the sticker or fails closed with a trim hint.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.th{font-weight:500;font-size:14px;fill:#2C2C2A}
+.ts{font-weight:400;font-size:12px;fill:#5F5E5A}
+.arr{stroke:#5F5E5A;stroke-width:1.5;fill:none}
+.c-purple rect{fill:#EEEDFE;stroke:#534AB7;stroke-width:1}.c-purple .th{fill:#3C3489}.c-purple .ts{fill:#534AB7}
+.c-teal rect{fill:#E1F5EE;stroke:#0F6E56;stroke-width:1}.c-teal .th{fill:#085041}.c-teal .ts{fill:#0F6E56}
+.c-coral rect{fill:#FAECE7;stroke:#993C1D;stroke-width:1}.c-coral .th{fill:#712B13}.c-coral .ts{fill:#993C1D}
+.c-amber rect{fill:#FAEEDA;stroke:#854F0B;stroke-width:1}.c-amber .th{fill:#633806}.c-amber .ts{fill:#854F0B}
+@media (prefers-color-scheme:dark){
+.th{fill:#F1EFE8}.ts{fill:#B4B2A9}.arr{stroke:#B4B2A9}
+.c-purple rect{fill:#3C3489;stroke:#AFA9EC}.c-purple .th{fill:#EEEDFE}.c-purple .ts{fill:#CECBF6}
+.c-teal rect{fill:#085041;stroke:#5DCAA5}.c-teal .th{fill:#E1F5EE}.c-teal .ts{fill:#9FE1CB}
+.c-coral rect{fill:#712B13;stroke:#F0997B}.c-coral .th{fill:#FAECE7}.c-coral .ts{fill:#F5C4B3}
+.c-amber rect{fill:#633806;stroke:#EF9F27}.c-amber .th{fill:#FAEEDA}.c-amber .ts{fill:#FAC775}
+}
+</style>
+
+<g class="c-purple"><rect x="100" y="50" width="260" height="54" rx="6"/>
+<text class="th" x="230" y="71" text-anchor="middle" dominant-baseline="central">Kept ranges</text>
+<text class="ts" x="230" y="89" text-anchor="middle" dominant-baseline="central">concat when 2 or more</text></g>
+<line class="arr" x1="230" y1="106" x2="230" y2="134" marker-end="url(#arrow)"/>
+
+<g class="c-purple"><rect x="100" y="138" width="260" height="54" rx="6"/>
+<text class="th" x="230" y="159" text-anchor="middle" dominant-baseline="central">Pick frame rate</text>
+<text class="ts" x="230" y="177" text-anchor="middle" dominant-baseline="central">source, floor 24fps</text></g>
+<line class="arr" x1="230" y1="194" x2="230" y2="222" marker-end="url(#arrow)"/>
+
+<g class="c-purple"><rect x="100" y="226" width="260" height="54" rx="6"/>
+<text class="th" x="230" y="247" text-anchor="middle" dominant-baseline="central">Extract frames</text>
+<text class="ts" x="230" y="265" text-anchor="middle" dominant-baseline="central">512px, crop or fit</text></g>
+<line class="arr" x1="230" y1="282" x2="230" y2="310" marker-end="url(#arrow)"/>
+
+<g class="c-purple"><rect x="100" y="314" width="260" height="54" rx="6"/>
+<text class="th" x="230" y="335" text-anchor="middle" dominant-baseline="central">Merge holds</text>
+<text class="ts" x="230" y="353" text-anchor="middle" dominant-baseline="central">stills held as one frame</text></g>
+<line class="arr" x1="230" y1="370" x2="230" y2="398" marker-end="url(#arrow)"/>
+
+<g class="c-purple"><rect x="100" y="402" width="260" height="54" rx="6"/>
+<text class="th" x="230" y="423" text-anchor="middle" dominant-baseline="central">Mux WebP</text>
+<text class="ts" x="230" y="441" text-anchor="middle" dominant-baseline="central">quality q90 down to q30</text></g>
+<line class="arr" x1="230" y1="458" x2="230" y2="486" marker-end="url(#arrow)"/>
+
+<g class="c-amber"><rect x="100" y="490" width="260" height="54" rx="6"/>
+<text class="th" x="230" y="511" text-anchor="middle" dominant-baseline="central">Under 500KB?</text>
+<text class="ts" x="230" y="529" text-anchor="middle" dominant-baseline="central">the WhatsApp cap</text></g>
+
+<line class="arr" x1="205" y1="546" x2="168" y2="576" marker-end="url(#arrow)"/>
+<line class="arr" x1="255" y1="546" x2="472" y2="576" marker-end="url(#arrow)"/>
+<text class="ts" x="150" y="562" text-anchor="middle" dominant-baseline="central">fits</text>
+<text class="ts" x="392" y="560" text-anchor="middle" dominant-baseline="central">over</text>
+
+<g class="c-teal"><rect x="60" y="580" width="200" height="54" rx="6"/>
+<text class="th" x="160" y="601" text-anchor="middle" dominant-baseline="central">Ship it</text>
+<text class="ts" x="160" y="619" text-anchor="middle" dominant-baseline="central">measure real spec</text></g>
+
+<g class="c-coral"><rect x="380" y="580" width="200" height="54" rx="6"/>
+<text class="th" x="480" y="601" text-anchor="middle" dominant-baseline="central">Fail closed</text>
+<text class="ts" x="480" y="619" text-anchor="middle" dominant-baseline="central">trim hint shown</text></g>
+</svg>
