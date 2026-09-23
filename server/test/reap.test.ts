@@ -69,9 +69,14 @@ test('a filmstrip is removed only once its source is gone', () => {
   const root = mk()
   const liveStrip = put(root, 'aaa-strip.jpg')
   const deadStrip = put(root, 'bbb-strip.jpg')
+  const liveFilm = put(root, 'aaa-film.jpg')
+  const deadFilm = put(root, 'bbb-film.jpg')
   const r = reapOrphans(base(root, { liveFileIds: ['aaa'] }))
   assert.ok(r.removed.includes('bbb-strip.jpg'))
   assert.ok(fs.existsSync(liveStrip), 'a strip whose source is still around stays cached')
+  assert.ok(r.removed.includes('bbb-film.jpg'), 'the tiled filmstrip is keyed by source id too')
+  assert.ok(fs.existsSync(liveFilm))
+  assert.ok(!fs.existsSync(deadFilm) && !fs.existsSync(deadStrip))
 })
 
 test('a crashed build leaves a .next that the next boot clears, but never a live pack', () => {

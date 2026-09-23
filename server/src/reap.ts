@@ -14,6 +14,8 @@ const walk = (dir: string): string[] => {
   }
 }
 
+const STRIP_SUFFIXES = ['-strip.jpg', '-film.jpg']
+
 export interface ReapInput {
   dataDir: string
   uploads: string
@@ -23,7 +25,7 @@ export interface ReapInput {
   packs: string
   /** Absolute paths still referenced by a file row. */
   liveFilePaths: Iterable<string>
-  /** Ids of file rows that still exist — filmstrips are named "<id>-strip.jpg". */
+  /** Ids of file rows that still exist — filmstrips are named "<id>-film.jpg" (legacy "-strip.jpg"). */
   liveFileIds: Iterable<string>
   /** Absolute paths still referenced by a job row: output and tray. */
   liveJobPaths: Iterable<string>
@@ -78,11 +80,13 @@ export function reapOrphans(input: ReapInput): ReapResult {
     sweep(dir, () => true)
   }
   // Filmstrips are written straight into DATA next to the database and keyed by the
-  // id of the source they were cut from.
+  // id of the source they were cut from. "-strip.jpg" is the legacy 96px-wide sprite,
+  // "-film.jpg" the taller one the timeline tiles today; both die with their source.
   const ids = new Set(input.liveFileIds)
   sweep(input.dataDir, p => {
-    if (!p.endsWith('-strip.jpg')) return false
-    return !ids.has(path.basename(p).slice(0, -(('-strip.jpg').length)))
+    const suffix = STRIP_SUFFIXES.find(s => p.endsWith(s))
+    if (!suffix) return false
+    return !ids.has(path.basename(p).slice(0, -suffix.length))
   })
 
   // A build that crashed leaves <code>.next behind. It is never the live pack — that

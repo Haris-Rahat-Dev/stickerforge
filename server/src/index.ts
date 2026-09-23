@@ -309,21 +309,26 @@ app.get('/api/video/:id', (req, res) => {
   streamFile(req, res, rec.path, mime)
 })
 
+// Tall enough for a crisp ~64px thumbnail on a 2× screen.
+const FILM_H = 128
+
 app.get('/api/filmstrip/:id', ah(async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
-  const out = path.join(DATA, `${req.params.id}-strip.jpg`)
+  const out = path.join(DATA, `${req.params.id}-film.jpg`)
   try {
     if (!fs.existsSync(out)) {
-      // Four frames a second, clamped to a readable range, so the trim aims at real
-      // frames rather than a fixed dozen smeared across the whole clip.
+      // A sprite of four frames a second (8–80), each FILM_H tall at the source's own
+      // aspect. The timeline tiles it into proportioned thumbnails; it must never be
+      // stretched as one image (that squeezed 30+ frames into slivers).
       const duration = Math.max(rec.meta.duration, 0.5)
       const n = Math.min(80, Math.max(8, Math.ceil(duration * 4)))
       const fpsArg = n / duration
       await new Promise<void>((resolve, reject) => {
         const p = spawn('ffmpeg', [
           '-i', rec.path,
-          '-vf', `fps=${fpsArg.toFixed(4)},scale=96:-1,tile=${n}x1`,
+          '-vf', `fps=${fpsArg.toFixed(4)},scale=-2:${FILM_H},tile=${n}x1`,
+          '-q:v', '4',
           '-frames:v', '1',
           '-y', out
         ])
@@ -460,6 +465,8 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     publishJob(job)
   }).catch((err: unknown) => {
     jobAbort.delete(jobId)
+    // A failed ladder leaves its last over-budget mux at outputPath; nothing references it.
+    fs.rmSync(outputPath, { force: true })
     if (err instanceof Error && err.name === 'AbortError') {
       job.status = 'cancelled'
     } else {

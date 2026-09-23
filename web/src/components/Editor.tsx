@@ -3,7 +3,7 @@ import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, estimate, discar
 import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, StickerSpec } from '../types.js'
 import { capFps, fpsChoices, MAX_STICKER_SEC, motionBudget, nextFitLength } from '../budget.js'
 import { keptSeconds, normalizeSpans, splitAt, type Span } from '../spans.js'
-import Timeline from './Timeline.jsx'
+import Timeline, { clock, sourceTimeAt } from './Timeline.jsx'
 import StickerPreview from './StickerPreview.jsx'
 import { SpecTable } from './StickerSpec.jsx'
 
@@ -75,6 +75,9 @@ export default function Editor({
 
   const [stripUrl, setStripUrl] = useState<string | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
+  // Seconds into the encoded sticker's loop, while it is what's on screen.
+  const [stickerOut, setStickerOut] = useState(0)
+  const stickerT0 = useRef(0)
   const [playing, setPlaying] = useState(!isImage)
   const [est, setEst] = useState<EstimateResult | null>(null)
   const [estimating, setEstimating] = useState(false)
@@ -110,6 +113,8 @@ export default function Editor({
   // A result is only worth adding while it still matches what the editor shows.
   const fresh = !!draft && (mode !== 'custom' || draft.key === settingsKey(customReq))
   const showingSticker = fresh && !showSource && !busy
+  const showingRef = useRef(showingSticker)
+  showingRef.current = showingSticker
 
   const dropDraft = (): void => {
     const id = draftRef.current
@@ -231,6 +236,9 @@ export default function Editor({
 
   const pickMode = (m: EditorMode): void => {
     if (m === mode) return
+    // The old mode's encode can't finish into this one; left alone its progress froze
+    // on screen and Generate stayed disabled. Stop it (and free its encode slot).
+    if (busy) stopEncode()
     if (m === 'custom') {
       // Custom opens on exactly what the preset made, so its result stays addable.
       setSpans([presetWindow])
@@ -260,6 +268,8 @@ export default function Editor({
     const v = videoRef.current
     if (!v || isImage) return
     const onTick = (): void => {
+      // The sticker owns the playhead while it is on screen; the source stays parked.
+      if (showingRef.current) { if (!v.paused) v.pause(); return }
       setCurrentTime(v.currentTime)
       if (scrubbing.current) return
       const cur = spansRef.current
@@ -284,6 +294,18 @@ export default function Editor({
     if (showingSticker) v.pause()
     else if (playingRef.current) v.play().catch(() => {})
   }, [showingSticker])
+
+  // An animated <img> exposes no clock, but it starts on load and loops at its own
+  // measured duration — close enough to walk the playhead through the kept cuts.
+  const stickerDur = draft?.spec?.duration ?? 0
+  useEffect(() => {
+    if (!showingSticker || stickerDur <= 0) return
+    if (!stickerT0.current) stickerT0.current = performance.now()
+    const id = setInterval(() => {
+      setStickerOut(((performance.now() - stickerT0.current) / 1000) % stickerDur)
+    }, 40)
+    return () => clearInterval(id)
+  }, [showingSticker, stickerDur])
 
   // Live projection — Custom only. Presets measure the real encode instead.
   const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps })
@@ -328,6 +350,28 @@ export default function Editor({
     else { v.pause(); setPlaying(false) }
   }
 
+  const stepFrame = (dir: -1 | 1): void => {
+    const v = videoRef.current
+    if (!v) return
+    setShowSource(true)
+    v.pause()
+    setPlaying(false)
+    const t = Math.min(duration, Math.max(0, v.currentTime + dir / sourceFps))
+    v.currentTime = t
+    setCurrentTime(t)
+  }
+
+  // Set the in/out of the cut under the playhead (or the nearest one) — Custom only.
+  const markAt = (edge: 'in' | 'out'): void => {
+    const t = currentTime
+    const dist = (s: Span): number => (t >= s.start && t <= s.end ? 0 : Math.min(Math.abs(t - s.start), Math.abs(t - s.end)))
+    let i = 0
+    spans.forEach((s, k) => { if (dist(s) < dist(spans[i])) i = k })
+    const next = spans.map((s, k) => k !== i ? s
+      : edge === 'in' ? { start: Math.min(t, s.end - 0.3), end: s.end } : { start: s.start, end: Math.max(t, s.start + 0.3) })
+    setSpans(normalizeSpans(next, duration))
+  }
+
   const cutAtPlayhead = (): void => {
     const t = currentTime
     const inSpan = spans.some(s => t > s.start + 0.05 && t < s.end - 0.05)
@@ -336,6 +380,37 @@ export default function Editor({
       : [...spans, { start: t, end: Math.min(duration, t + 1) }]
     setSpans(normalizeSpans(next, duration))
   }
+
+  const kept = keptSeconds(activeSpans)
+  const playheadTime = showingSticker && stickerDur > 0
+    ? sourceTimeAt(activeSpans, (stickerOut / stickerDur) * kept)
+    : currentTime
+
+  // Editor keys. Skipped while typing, and space is left to a focused button.
+  const keys = useRef({ togglePlay, stepFrame, markAt, cutAtPlayhead, mode, showingSticker })
+  keys.current = { togglePlay, stepFrame, markAt, cutAtPlayhead, mode, showingSticker }
+  useEffect(() => {
+    if (isImage) return
+    const onKey = (e: KeyboardEvent): void => {
+      const el = e.target as HTMLElement
+      if (el.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return
+      const k = keys.current
+      if (e.key === ' ' && !el.closest('button')) {
+        e.preventDefault()
+        if (k.showingSticker) setShowSource(true)
+        k.togglePlay()
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault()
+        k.stepFrame(e.key === 'ArrowLeft' ? -1 : 1)
+      } else if (k.mode === 'custom' && (e.key === 'i' || e.key === 'o')) {
+        k.markAt(e.key === 'i' ? 'in' : 'out')
+      } else if (k.mode === 'custom' && e.key === 'c') {
+        k.cutAtPlayhead()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isImage])
 
   const outDur = keptSeconds(spans)
   const budget = motionBudget(outDur, fps)
@@ -403,9 +478,16 @@ export default function Editor({
             <div className="stage">
               {isImage
                 ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} style={showingSticker ? { visibility: 'hidden' } : undefined} />
-                : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay style={showingSticker ? { visibility: 'hidden' } : undefined} />}
+                : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />}
               {mode === 'custom' && !pad && !showingSticker && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
-              {showingSticker && draft && <StickerPreview jobId={draft.jobId} className="crop-full sticker-result" />}
+              {showingSticker && draft && (
+                <StickerPreview
+                  key={draft.jobId}
+                  jobId={draft.jobId}
+                  className="crop-full sticker-result"
+                  onLoad={() => { stickerT0.current = performance.now(); setStickerOut(0) }}
+                />
+              )}
               {busy && (
                 <div className="stage-status">
                   <span>{mode === 'custom' ? 'Generating' : 'Encoding'} · {Math.round(busy.progress * 100)}%</span>
@@ -463,12 +545,26 @@ export default function Editor({
           {!isImage && (
             <>
               <div className="tl-transport">
-                <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause' : 'Play'}>
-                  {playing ? '⏸' : '▶'}
-                </button>
-                <span className="tl-time">{currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
-                {mode === 'custom' && (
-                  <button className="btn btn-ghost btn-sm" onClick={cutAtPlayhead} title="Split the clip here, or keep a new range at the playhead">✂ Cut at playhead</button>
+                {showingSticker ? (
+                  <span className="tl-following-note">
+                    ● STICKER LOOP · {stickerOut.toFixed(1)}s / {stickerDur.toFixed(1)}s — green playhead = where it is in the source
+                  </span>
+                ) : (
+                  <>
+                    <button className="btn btn-ghost btn-sm tl-play" onClick={togglePlay} title={playing ? 'Pause (space)' : 'Play (space)'}>
+                      {playing ? '⏸' : '▶'}
+                    </button>
+                    <button className="btn btn-ghost btn-sm tl-step" onClick={() => stepFrame(-1)} title="Previous frame (←)">‹</button>
+                    <button className="btn btn-ghost btn-sm tl-step" onClick={() => stepFrame(1)} title="Next frame (→)">›</button>
+                    <span className="tl-time">{clock(currentTime, duration >= 60)} <small>/ {clock(duration, duration >= 60)}</small></span>
+                  </>
+                )}
+                {mode === 'custom' && !showingSticker && (
+                  <>
+                    <button className="btn btn-ghost btn-sm" onClick={() => markAt('in')} title="Set the cut's start here (I)">[ In</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => markAt('out')} title="Set the cut's end here (O)">Out ]</button>
+                    <button className="btn btn-ghost btn-sm" onClick={cutAtPlayhead} title="Split the cut here, or add a new one at the playhead (C)">✂ Cut</button>
+                  </>
                 )}
               </div>
               {mode === 'custom' ? (
@@ -476,8 +572,10 @@ export default function Editor({
                   duration={duration}
                   spans={spans}
                   stripUrl={stripUrl}
+                  aspect={meta.width / meta.height}
                   maxSpan={maxSpan}
-                  currentTime={currentTime}
+                  currentTime={playheadTime}
+                  playhead={showingSticker ? 'sticker' : 'source'}
                   onChange={onSpansChange}
                   onSeek={seekPreview}
                   onSeekEnd={endScrub}
@@ -487,8 +585,10 @@ export default function Editor({
                   duration={duration}
                   spans={[presetWindow]}
                   stripUrl={stripUrl}
+                  aspect={meta.width / meta.height}
                   maxSpan={maxSpan}
-                  currentTime={currentTime}
+                  currentTime={playheadTime}
+                  playhead={showingSticker ? 'sticker' : 'source'}
                   onChange={onPresetWindow}
                   onSeek={seekPreview}
                   onSeekEnd={endScrub}
@@ -498,8 +598,8 @@ export default function Editor({
               )}
               <p className="tl-hint">
                 {mode === 'custom'
-                  ? <>Click the strip to move the playhead · drag a cut’s edges to trim, its body to move · ✂ cuts at the playhead{spans.length > 1 ? ' · ✕ removes a cut' : ''}</>
-                  : <>Slide the window to pick the moment — it re-encodes when you let go. The length is whatever fits at {presetFps(mode)}fps.</>}
+                  ? <>Drag a cut’s handles to trim, its body to move · click or drag the ruler to scrub · space play · ←/→ frame · I/O set in/out · C cut{spans.length > 1 ? ' · ✕ removes a cut' : ''} · ⌘/Ctrl-scroll to zoom</>
+                  : <>Slide the window to pick the moment — it re-encodes when you let go. The length is whatever fits at {presetFps(mode)}fps. Space play · ←/→ frame.</>}
               </p>
             </>
           )}

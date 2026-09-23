@@ -69,7 +69,16 @@ export async function inspectWebp(outPath: string): Promise<{
 async function frameSsim(referencePng: string, outPath: string, tmp: string): Promise<number | null> {
   const decoded = path.join(tmp, 'decoded.png')
   try {
-    await run('ffmpeg', ['-y', '-v', 'error', '-i', outPath, '-frames:v', '1', decoded])
+    try {
+      await run('ffmpeg', ['-y', '-v', 'error', '-i', outPath, '-frames:v', '1', decoded])
+    } catch {
+      // ffmpeg < 7.1 (Ubuntu 22.04's 4.4, i.e. the VM) cannot decode animated WebP, which
+      // left every hosted sticker with ssim: null. Frame 1 is a full-canvas keyframe, so
+      // libwebp's own tools can pull it out undistorted.
+      const first = path.join(tmp, 'frame1.webp')
+      await run('webpmux', ['-get', 'frame', '1', outPath, '-o', first])
+      await run('dwebp', [first, '-quiet', '-o', decoded])
+    }
     // The SSIM summary is logged at info level, so this must not run with -v error.
     const out = await capture('ffmpeg', [
       '-hide_banner', '-nostats', '-i', referencePng, '-i', decoded,
@@ -582,7 +591,12 @@ function runWithProgress(
   })
 }
 
-const IMG2WEBP_HEAD = ['-mixed', '-sharp_yuv', '-loop', '0', '-kmin', '3', '-kmax', '15']
+// Keyframe every ≤6 frames. Lossy delta frames reuse the previous frame wherever a pixel
+// moved less than a q-dependent threshold (≈10–15 levels at q30–50), so error builds up
+// frame on frame as ghosting until the next keyframe. Measured on Cat at 15fps/q30
+// (libwebp 1.2.2 and 1.6.0 alike): kmax 15 → worst-frame SSIM 0.941, kmax 6 → 0.953,
+// for +2KB. Mostly-static clips pay ~10% more bytes; kmax 3 cost them ~37%.
+const IMG2WEBP_HEAD = ['-mixed', '-sharp_yuv', '-loop', '0', '-kmin', '2', '-kmax', '6']
 const img2webpSkip = new Set<string>()
 
 export function unknownImg2webpFlag(message: string): string | null {
