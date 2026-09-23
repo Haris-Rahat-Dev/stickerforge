@@ -243,6 +243,8 @@ export default function App() {
   }
 
   const onDiscardStaged = async (fileId: string): Promise<void> => {
+    const name = state.staged.find(x => x.id === fileId)?.originalName ?? 'this upload'
+    if (!confirm(`Discard “${name}”?\n\nThe upload is deleted from the server. This cannot be undone.`)) return
     await deleteFile(fileId).catch(() => {})
     dispatch({ type: 'discard', fileId })
   }
