@@ -230,7 +230,9 @@ export default function Editor({
   }, [mode, presetTick, file.id, isImage, duration]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const generate = async (): Promise<void> => {
-    if (!isImage && !motionBudget(keptSeconds(spans), fps).ok) return
+    // Sticker seconds (kept / speed) — the 6s cap is on the sticker. Checking the raw kept
+    // span silently swallowed Generate for any sped-up cut longer than 6s of source.
+    if (!isImage && !motionBudget(keptSeconds(spans) / speed, fps).ok) return
     const ticket = ++runRef.current
     try {
       const d = await encodeDraft(customReq, ticket)
