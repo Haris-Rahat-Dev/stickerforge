@@ -48,6 +48,11 @@ export interface ConvertSettings {
   crop: CropRect | null
   cropPos: number
   border: boolean
+  /**
+   * Lowest WebP quality the encoder may fall to. Unset = 30. Presets ask for 50: a busy
+   * 4s at q30 had frames at SSIM 0.80 (visibly blocky) where trimming would have been clean.
+   */
+  minQ?: number
 }
 
 export type MediaKind = 'video' | 'image'

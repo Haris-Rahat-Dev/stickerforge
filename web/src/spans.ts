@@ -11,7 +11,11 @@ export function spansFromTrim(start: number, end: number): Span[] {
   return [{ start, end }]
 }
 
-export function normalizeSpans(spans: Span[], duration: number): Span[] {
+/**
+ * Clamp, sort, merge, and cap the kept total at `maxKept` source seconds — 6 at 1×, but
+ * 6 × speed when sped up, since WhatsApp's cap is on the sticker, not the source.
+ */
+export function normalizeSpans(spans: Span[], duration: number, maxKept = MAX_KEPT): Span[] {
   const cleaned = spans
     .map(s => ({
       start: Math.max(0, Math.min(duration, s.start)),
@@ -25,9 +29,9 @@ export function normalizeSpans(spans: Span[], duration: number): Span[] {
     if (last && s.start <= last.end + 0.001) last.end = Math.max(last.end, s.end)
     else merged.push({ ...s })
   }
-  while (keptSeconds(merged) > MAX_KEPT + 0.01 && merged.length > 0) {
+  while (keptSeconds(merged) > maxKept + 0.01 && merged.length > 0) {
     const last = merged[merged.length - 1]
-    const over = keptSeconds(merged) - MAX_KEPT
+    const over = keptSeconds(merged) - maxKept
     if (last.end - last.start - over >= MIN_SPAN) last.end = Math.round((last.end - over) * 100) / 100
     else merged.pop()
   }

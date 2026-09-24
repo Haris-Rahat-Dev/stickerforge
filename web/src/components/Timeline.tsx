@@ -123,6 +123,8 @@ interface TimelineProps {
   playhead?: 'source' | 'sticker'
   /** One marker per join (cut or loop), coloured by how visible it is; click to snap. */
   seams?: Array<{ at: number; kind: 'cut' | 'loop'; label: string; title: string; onClick?: () => void }>
+  /** Playback speed: the kept source plays in kept/speed seconds of sticker. */
+  speed?: number
 }
 
 interface DragState {
@@ -140,14 +142,14 @@ interface DragState {
 
 export default function Timeline({
   duration, spans, stripUrl, aspect, maxSpan, currentTime, onChange, onSeek, onSeekEnd,
-  lockLength = false, onDragEnd, playhead = 'source', seams = [],
+  lockLength = false, onDragEnd, playhead = 'source', seams = [], speed = 1,
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
   const [viewPx, setViewPx] = useState(0)
-  const live = useRef({ duration, spans, onChange, onSeek, onSeekEnd, lockLength, onDragEnd })
-  live.current = { duration, spans, onChange, onSeek, onSeekEnd, lockLength, onDragEnd }
+  const live = useRef({ duration, spans, onChange, onSeek, onSeekEnd, lockLength, onDragEnd, maxSpan })
+  live.current = { duration, spans, onChange, onSeek, onSeekEnd, lockLength, onDragEnd, maxSpan }
   const dragRef = useRef<DragState | null>(null)
   const [dragging, setDragging] = useState(false)
 
@@ -235,7 +237,7 @@ export default function Timeline({
     if (drag.kind === 'seek') { live.current.onSeek(t); return }
     const one = applyTrimDrag(drag.mode, t, drag.originStart, drag.originEnd, d, drag.grabOffset)
     const next = drag.originSpans.map((s, i) => i === drag.index ? one : s)
-    live.current.onChange(normalizeSpans(next, d))
+    live.current.onChange(normalizeSpans(next, d, live.current.maxSpan))
     live.current.onSeek(drag.mode === 'start' ? one.start : drag.mode === 'end' ? one.end : Math.min(one.end, Math.max(one.start, t)))
   }
 
@@ -252,7 +254,7 @@ export default function Timeline({
 
   const removeSpan = (i: number): void => {
     const d = live.current.duration
-    live.current.onChange(normalizeSpans(live.current.spans.filter((_, k) => k !== i), d))
+    live.current.onChange(normalizeSpans(live.current.spans.filter((_, k) => k !== i), d, live.current.maxSpan))
   }
 
   const pct = (t: number): string => `${duration > 0 ? (t / duration) * 100 : 0}%`
@@ -361,7 +363,7 @@ export default function Timeline({
         <span className="tl-io"><b>IN</b> {clock(first?.start ?? 0, long)}</span>
         <span className="tl-io"><b>OUT</b> {clock(last?.end ?? 0, long)}</span>
         <span className={`tl-io ${overLimit ? 'tl-span-bad' : ''}`}>
-          <b>KEPT</b> {kept.toFixed(2)}s{spans.length > 1 ? ` · ${spans.length} cuts` : ''}{overLimit ? ` — over ${maxSpan.toFixed(1)}s` : ''}
+          <b>KEPT</b> {kept.toFixed(2)}s{speed !== 1 ? ` → ${(kept / speed).toFixed(2)}s at ${speed}×` : ''}{spans.length > 1 ? ` · ${spans.length} cuts` : ''}{overLimit ? ` — over ${maxSpan.toFixed(1)}s` : ''}
         </span>
         <span className="tl-zoom">
           <button className="tl-zoom-btn" disabled={zoom <= 1} onClick={() => zoomTo(zoom / 1.5)} title="Zoom out (⌘/Ctrl + scroll)">−</button>

@@ -219,7 +219,7 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
   const raw: Span[] = Array.isArray(body.spans)
     ? (body.spans as Partial<Span>[]).map(s => ({ start: Number(s.start) || 0, end: Number(s.end) || 0 }))
     : [{ start, end }]
-  const spans = normalizeSpans(raw, duration || maxSrcSpanForSpeed(speed))
+  const spans = normalizeSpans(raw, duration || maxSrcSpanForSpeed(speed), maxSrcSpanForSpeed(speed))
   const first = spans[0] ?? { start, end }
   return {
     // start/end mirror the first span so anything still reading those two fields
@@ -232,7 +232,8 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
     padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
     crop: sanitizeCrop(body.crop as Partial<CropRect> | null, rec.meta),
     cropPos: clampPos(body.cropPos),
-    border: !!body.border
+    border: !!body.border,
+    ...(Number(body.minQ) >= 30 ? { minQ: Math.min(70, Math.round(Number(body.minQ))) } : {}),
   }
 }
 
@@ -403,7 +404,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
   jobs.set(jobId, job)
   if (signal) jobAbort.set(jobId, controller ?? new AbortController())
 
-  const { start, end, spans, speed, fps, fit, padColor, crop, cropPos, border } = settings
+  const { start, end, spans, speed, fps, fit, padColor, crop, cropPos, border, minQ } = settings
 
   const task = rec.kind === 'image'
     ? async () => {
@@ -418,7 +419,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
         // generation was the pixelation. Settings apply once here.
         const webp = await convertToAnimatedWebp({
           inputPath: rec.path, outPath: outputPath,
-          start, end, spans, speed, fps, fit, padColor, crop, cropPos, border,
+          start, end, spans, speed, fps, fit, padColor, crop, cropPos, border, minQ,
         }, (p, stage) => {
           job.progress = p
           job.stage = stage
@@ -538,7 +539,8 @@ app.post('/api/seams', ah(async (req, res) => {
     const only = Number.isInteger(req.body.only) ? Number(req.body.only) : null
     const cropF = s.crop ? `crop=${s.crop.w}:${s.crop.h}:${s.crop.x}:${s.crop.y},` : ''
     res.json(await planSeams({
-      inputPath: rec.path, spans, duration: rec.meta.duration, fps: s.fps, only,
+      // Sped up, consecutive sticker frames are speed/fps apart in the source.
+      inputPath: rec.path, spans, duration: rec.meta.duration, fps: Math.min(60, Math.round(s.fps * s.speed)), only,
       preVf: cropF + buildFilters(s.fit, s.padColor, s.cropPos, s.border),
     }))
   } catch {

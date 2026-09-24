@@ -359,6 +359,8 @@ export async function estimateSticker(inputPath: string, opts: ConvertSettings):
   const kept = keptSeconds(spans)
   const fps = opts.fps
   const speed = opts.speed || 1
+  // Seconds of sticker, not source: sped up, the same kept span plays shorter.
+  const outDur = kept / speed
   const concat = concatPrefix(spans)
   const cropF = opts.crop ? `crop=${opts.crop.w}:${opts.crop.h}:${opts.crop.x}:${opts.crop.y},` : ''
   const filters = buildFilters(opts.fit, opts.padColor, opts.cropPos, opts.border)
@@ -368,7 +370,7 @@ export async function estimateSticker(inputPath: string, opts: ConvertSettings):
   try {
     // Effective frame count after hold-merging, over the whole kept span (cheap 16×16).
     const held = await probeHoldCount(inputPath, start, kept, fps, `${cropF}setpts=PTS/${speed}`, tmp, concat)
-    const effFrames = held > 1 ? held : Math.max(2, Math.round(kept * fps))
+    const effFrames = held > 1 ? held : Math.max(2, Math.round(outDur * fps))
 
     // Real per-frame cost from a CONTIGUOUS sample (distinct delta frames at the true
     // frame rate), not the every-Nth subsample measureSpanBytes uses. Sampled from ~40%
@@ -404,7 +406,7 @@ export async function estimateSticker(inputPath: string, opts: ConvertSettings):
         : QUALITY_EXP
       bytesAt = (q: number) => b50 * Math.pow(q / 50, e)
     } else {
-      const b50 = estimatedBytes(kept, fps)
+      const b50 = estimatedBytes(outDur, fps)
       bytesAt = (q: number) => b50 * Math.pow(q / 50, QUALITY_EXP)
     }
 
@@ -415,7 +417,7 @@ export async function estimateSticker(inputPath: string, opts: ConvertSettings):
     const fits = bytesAt(30) <= targetEst
     // The encoder lands on the HIGHEST q that fits (ladder runs 90→30, stops at first fit).
     const qNeeded = solveQ(bytesAt, targetEst)
-    const effectiveFps = Math.min(fps, Math.max(1, Math.round(effFrames / Math.max(0.1, kept))))
+    const effectiveFps = Math.min(fps, Math.max(1, Math.round(effFrames / Math.max(0.1, outDur))))
     return {
       fits,
       keptSeconds: Math.round(kept * 100) / 100,
@@ -424,7 +426,8 @@ export async function estimateSticker(inputPath: string, opts: ConvertSettings):
       projectedKB: Math.round(bytesAt(qNeeded) / 1024),
       qNeeded,
       quality: qualityLabel(qNeeded),
-      maxSeconds: fits ? Math.min(MAX_STICKER_SEC, kept) : secondsThatFit(kept, bytesAt(30), targetEst),
+      // Source seconds — what the trim control moves.
+      maxSeconds: fits ? Math.min(MAX_STICKER_SEC * speed, kept) : secondsThatFit(kept, bytesAt(30), targetEst),
     }
   } finally {
     await rm(tmp, { recursive: true, force: true })
@@ -449,14 +452,15 @@ export async function convertToAnimatedWebp(
   opts: WebpOptions,
   progress?: (p: number, stage: string) => void,
 ): Promise<WebpResult> {
-  const { inputPath, outPath, start, end, speed = 1, fps, fit, padColor, crop, cropPos, border } = opts
+  const { inputPath, outPath, start, end, speed = 1, fps, fit, padColor, crop, cropPos, border, minQ } = opts
   // Several kept ranges are concatenated up front; one range keeps the -ss/-t path.
   const spans: Span[] = opts.spans && opts.spans.length ? opts.spans : [{ start, end }]
   const concat = concatPrefix(spans)
   const single = planSpan(start, end, speed)
   // With a concat the source span is the joined length; -t is not used.
   const srcSpan = concat ? keptSeconds(spans) : single.srcSpan
-  const outDur = concat ? keptSeconds(spans) : single.outDur
+  // setpts=PTS/speed runs after the concat too, so the sticker is kept/speed long.
+  const outDur = concat ? keptSeconds(spans) / (speed > 0 ? speed : 1) : single.outDur
   const tmp = fs_mkdtemp()
   const framesDir = path.join(tmp, 'frames')
   await mkdir(framesDir, { recursive: true })
@@ -468,11 +472,11 @@ export async function convertToAnimatedWebp(
     // Floor for the LAST fps only. A busy photographic clip at 512²/24fps needs q≈30
     // to fit 4s under 500KB — flooring at 50 rejected clips that q30 encodes fine. The
     // projections use this floor too, so they only fail closed when even q30 can't fit.
-    const lowestQ = 30
+    const lowestQ = Math.min(70, Math.max(30, minQ ?? 30))
     // Keep q ≥ 70 while we still have fps to give. Crushing to 20 at 30fps is the
     // pixelation users saw; 24fps at q70 beats 30fps mush. Only the last fps drops below.
     const qualitiesAtFps = [90, 80, 70]
-    const lastResort = [60, 50, 40, 30]
+    const lastResort = [60, 50, 40, 30].filter(q => q >= lowestQ)
     let lastSize = 0
     let lastFps = steps[0]
     let lastHeld: HeldFrame[] = []

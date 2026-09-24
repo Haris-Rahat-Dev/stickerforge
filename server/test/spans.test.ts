@@ -39,3 +39,10 @@ test('two spans become a concat prefix', () => {
   assert.ok(vf?.includes('trim=start=5:end=6.25'))
   assert.ok(vf?.includes('concat=n=2:v=1:a=0,'))
 })
+
+test('sped up, the 6s cap applies to the sticker, so 6 × speed of source may be kept', () => {
+  // 8s of source at 2× is a 4s sticker — legal; at 1× the same cuts stop at 6s.
+  const cuts = [{ start: 0, end: 4 }, { start: 5, end: 9 }]
+  assert.equal(keptSeconds(normalizeSpans(cuts, 20, 12)), 8)
+  assert.equal(keptSeconds(normalizeSpans(cuts, 20)), 6)
+})

@@ -391,6 +391,7 @@ body::after {
 .fps-row .ctl-label { margin-top: 0; }
 .fps-note { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .est-actions { display: flex; gap: 8px; }
+.est-inline { margin-left: 8px; }
 
 .advanced { margin-top: 4px; }
 .adv-toggle { align-self: flex-start; color: var(--muted); }

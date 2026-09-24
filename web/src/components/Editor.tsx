@@ -23,11 +23,17 @@ function squareInside(r: CropRect): CropRect {
  */
 export type EditorMode = 'short' | 'long' | 'custom'
 const LONG_FPS = 15
+const SPEEDS = [1, 1.25, 1.5, 2]
 /** Budget failures shrink the preset window to what the encoder measured would fit. */
 const FIT_ATTEMPTS = 4
 
 /** Identity of an encode's settings, so a result can tell when the editor has moved on. */
-const settingsKey = ({ fileId: _f, ...s }: ConvertRequest): string => JSON.stringify(s)
+/**
+ * Identity of an encode's settings, so a result can tell when the editor has moved on.
+ * The quality floor is a preset's policy, not a look — leave it out so Custom still
+ * recognises the preset's result as its own.
+ */
+const settingsKey = ({ fileId: _f, minQ: _q, ...s }: ConvertRequest): string => JSON.stringify(s)
 
 interface Draft {
   jobId: string
@@ -67,6 +73,9 @@ export default function Editor({
   const [cropDetecting, setCropDetecting] = useState(false)
   const [border, setBorder] = useState(false)
   const [fps, setFps] = useState(sourceFps)
+  // Playback speed. Measured: 4s of busy source at 2× fits at q70 (worst frame 0.987)
+  // where the same 4s at 1× needs the blocky q30 — half the frames, same moment.
+  const [speed, setSpeed] = useState(1)
 
   const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState<{ progress: number; stage: string } | null>(null)
@@ -109,11 +118,13 @@ export default function Editor({
     fileId: file.id, start, end: start + len, spans: [{ start, end: start + len }],
     speed: 1, fps: presetFps(m), fit: needsFraming ? 'contain' : 'cover', padColor: '#000000',
     crop: needsFraming ? null : squareCrop(meta.width, meta.height), cropPos: 0.5, border: false,
+    // Presets trim rather than crush: q30 turned smooth skin into visible blocks.
+    minQ: 50,
   })
   const fit: FitMode = pad ? 'contain' : 'cover'
   const customReq: ConvertRequest = {
     fileId: file.id, start: spans[0].start, end: spans[spans.length - 1].end, spans,
-    speed: 1, fps, fit, padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
+    speed, fps, fit, padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
   }
 
   // A result is only worth adding while it still matches what the editor shows.
@@ -249,6 +260,7 @@ export default function Editor({
       // Custom opens on exactly what the preset made, so its result stays addable.
       setSpans([presetWindow])
       setFps(presetFps(mode))
+      setSpeed(1)
       setPad(needsFraming)
       setCrop(squareCrop(meta.width, meta.height))
       setBorder(false)
@@ -293,6 +305,12 @@ export default function Editor({
     return () => v.removeEventListener('timeupdate', onTick)
   }, [file.id, isImage])
 
+  // The preview plays at the sticker's speed, so what you trim is what you'll see.
+  useEffect(() => {
+    const v = videoRef.current
+    if (v) v.playbackRate = mode === 'custom' ? speed : 1
+  }, [speed, mode])
+
   // The source only plays while it is what's on screen.
   useEffect(() => {
     const v = videoRef.current
@@ -314,7 +332,7 @@ export default function Editor({
   }, [showingSticker, stickerDur])
 
   // Live projection — Custom only. Presets measure the real encode instead.
-  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps })
+  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps, v: speed })
   useEffect(() => {
     if (isImage || mode !== 'custom') return
     const ctrl = new AbortController()
@@ -375,7 +393,7 @@ export default function Editor({
     spans.forEach((s, k) => { if (dist(s) < dist(spans[i])) i = k })
     const next = spans.map((s, k) => k !== i ? s
       : edge === 'in' ? { start: Math.min(t, s.end - 0.3), end: s.end } : { start: s.start, end: Math.max(t, s.start + 0.3) })
-    setSpans(normalizeSpans(next, duration))
+    setSpans(normalizeSpans(next, duration, maxSpan))
   }
 
   const cutAtPlayhead = (): void => {
@@ -384,7 +402,7 @@ export default function Editor({
     const next = inSpan
       ? splitAt(spans, t)
       : [...spans, { start: t, end: Math.min(duration, t + 1) }]
-    setSpans(normalizeSpans(next, duration))
+    setSpans(normalizeSpans(next, duration, maxSpan))
   }
 
   const kept = keptSeconds(activeSpans)
@@ -418,9 +436,11 @@ export default function Editor({
     return () => window.removeEventListener('keydown', onKey)
   }, [isImage])
 
-  const outDur = keptSeconds(spans)
+  // Sticker seconds, not source: sped up, the same cuts play shorter. WhatsApp's 6s cap
+  // is on the sticker, so up to 6 × speed seconds of source may be kept.
+  const outDur = keptSeconds(spans) / speed
   const budget = motionBudget(outDur, fps)
-  const maxSpan = Math.min(MAX_STICKER_SEC, duration)
+  const maxSpan = Math.min(MAX_STICKER_SEC * speed, duration)
 
   const onSpansChange = (next: Span[]): void => {
     setSpans(next.length ? next : [{ start: 0, end: Math.min(MAX_STICKER_SEC, duration) }])
@@ -444,7 +464,7 @@ export default function Editor({
   // start — or just seam `only`. Cuts may grow the sticker (reported), the loop only
   // trims. Presets hand over to Custom, where cuts can move.
   const spansKey = JSON.stringify(spans)
-  const seamReqKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps })
+  const seamReqKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps, v: speed })
   const smoothSeams = async (only?: number): Promise<void> => {
     // A preset encode is abandoned anyway when this hands over to Custom (pickMode stops it).
     if (isImage || smoothing || (busy && mode === 'custom')) return
@@ -470,7 +490,7 @@ export default function Editor({
   // End a piece before the black it runs into (or start it after).
   const fixBlank = (piece: number, kind: 'ends-blank' | 'starts-blank', at: number): void => {
     setSpans(normalizeSpans(spans.map((s, i) => i !== piece ? s
-      : kind === 'ends-blank' ? { start: s.start, end: at } : { start: at, end: s.end }), duration))
+      : kind === 'ends-blank' ? { start: s.start, end: at } : { start: at, end: s.end }), duration, maxSpan))
   }
 
   // Live seam scores while editing in Custom, for the markers on the timeline.
@@ -634,6 +654,7 @@ export default function Editor({
                 currentTime={playheadTime}
                 playhead={showingSticker ? 'sticker' : 'source'}
                 seams={seamMarkers}
+                speed={speed}
                 onChange={onSpansChange}
                 onSeek={seekPreview}
                 onSeekEnd={endScrub}
@@ -730,6 +751,30 @@ export default function Editor({
             </div>
           )}
 
+          {mode === 'custom' && !isImage && (
+            <div className="fps-row">
+              <span className="ctl-label">Speed</span>
+              <div className="seg">
+                {SPEEDS.map(v => (
+                  <button
+                    key={v}
+                    className={`seg-btn ${speed === v ? 'active' : ''}`}
+                    disabled={!!busy}
+                    onClick={() => {
+                      setSpeed(v)
+                      // Slowing down lowers the source cap (6 × speed): trim to it.
+                      setSpans(cur => normalizeSpans(cur, duration, Math.min(MAX_STICKER_SEC * v, duration)))
+                    }}
+                  >{v}×</button>
+                ))}
+              </div>
+              <span className="fps-note">
+                Plays the moment faster: fewer frames to store, so it stays sharp at full frame rate
+                {speed > 1 ? ` · ${keptSeconds(spans).toFixed(1)}s of clip → ${outDur.toFixed(1)}s sticker` : ''}.
+              </span>
+            </div>
+          )}
+
           {mode === 'custom' && !isImage && !fresh && (
             <div
               className={`budget est-line ${(!budget.ok || est?.fits === false || est?.quality === 'very soft') ? 'budget-over' : ''}`}
@@ -742,6 +787,9 @@ export default function Editor({
                   <>
                     <span>Won’t fit at {fps}fps — about {(est.maxSeconds ?? 0).toFixed(1)}s fits at this framing{pad ? '' : ' (try Fit whole)'}.</span>
                     <span className="est-actions">
+                      {speed < 1.5 && (
+                        <button className="btn btn-sm" onClick={() => setSpeed(1.5)}>Try 1.5× speed</button>
+                      )}
                       {fps > LONG_FPS && choices.includes(LONG_FPS) && (
                         <button className="btn btn-sm" onClick={() => setFps(LONG_FPS)}>Try {LONG_FPS}fps</button>
                       )}
@@ -755,6 +803,9 @@ export default function Editor({
                     estimate <b>≈ {est.projectedKB}KB</b> · {outDur.toFixed(1)}s · {est.effectiveFps}fps
                     {' · '}<span className="est-q">{est.quality}</span>
                     {estimating ? ' · updating…' : ''} — Generate to see the real thing
+                    {(est.quality === 'soft' || est.quality === 'very soft') && speed < 1.5 && (
+                      <button className="btn btn-sm est-inline" onClick={() => setSpeed(1.5)}>Sharper: 1.5× speed</button>
+                    )}
                   </span>
                 )
                 : estimating

@@ -57,6 +57,8 @@ export interface ConvertSettings {
   crop: CropRect | null
   cropPos: number
   border: boolean
+  /** Lowest WebP quality the encoder may use (unset = 30). Presets send 50. */
+  minQ?: number
 }
 
 export interface ConvertRequest extends ConvertSettings {
