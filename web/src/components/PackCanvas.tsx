@@ -6,6 +6,7 @@ import type { FileRecord, StickerView, UploadProgress } from '../types.js'
 export default function PackCanvas(props: {
   pack: PackSummary
   staged: FileRecord[]
+  shelfLoading?: boolean
   uploading: UploadProgress[]
   encoding: Record<string, number>
   errors: Record<string, string>
@@ -51,6 +52,7 @@ export default function PackCanvas(props: {
 
       <StagingShelf
         staged={props.staged}
+        loading={props.shelfLoading}
         uploading={props.uploading}
         encoding={props.encoding}
         errors={props.errors}

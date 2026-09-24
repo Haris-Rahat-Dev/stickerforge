@@ -27,7 +27,8 @@ import { authRequired, signOutUser } from './auth.js'
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState)
-  const [allStickers, setAllStickers] = useState<StickerView[]>([])
+  // null until the library's first fetch lands, so it shows placeholders, not "no stickers".
+  const [allStickers, setAllStickers] = useState<StickerView[] | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [editorTarget, setEditorTarget] = useState<{ file: FileRecord; replaceAt?: number } | null>(null)
@@ -46,8 +47,10 @@ export default function App() {
     return stickers
   }
 
+  // Refresh behind the canvas: it already opened with the cached shelf.
   const hydrateShelf = async (code: string): Promise<void> => {
     const [files, packs] = await Promise.all([listFiles().catch(() => [] as FileRecord[]), refreshPacks()])
+    dispatch({ type: 'setFiles', files })
     const pack = packs.find(p => p.code === code)
     dispatch({ type: 'setStaged', files: shelfFiles(files, pack?.stickers.map(s => s.fileId) ?? []) })
   }
@@ -57,8 +60,10 @@ export default function App() {
     void hydrateShelf(code)
   }
 
+  // Packs and uploads in parallel at start: the canvas then opens complete.
   useEffect(() => {
     void refreshPacks()
+    void listFiles().then(files => dispatch({ type: 'setFiles', files })).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -232,6 +237,8 @@ export default function App() {
       const manifest = await buildPack(pack.code, e => dispatch({ type: 'buildProgress', ...e }))
       dispatch({ type: 'buildOk', manifest })
       await refreshPacks()
+      // The build deleted its sources on the server; drop them from the cached uploads.
+      void listFiles().then(files => dispatch({ type: 'setFiles', files })).catch(() => {})
     } catch (err) {
       dispatch({ type: 'buildFail', error: err instanceof Error ? err.message : 'Pack build failed' })
     }
@@ -286,6 +293,7 @@ export default function App() {
       {state.route === 'packs' && (
         <PacksHome
           packs={state.packs}
+          loading={!state.packsLoaded}
           onOpen={openPack}
           onNew={newPack}
           onRename={renamePackByCode}
@@ -296,7 +304,8 @@ export default function App() {
 
       {state.route === 'stickers' && (
         <StickerLibrary
-          stickers={allStickers}
+          stickers={allStickers ?? []}
+          loading={allStickers == null}
           packsByJob={packsByJob}
           onBack={() => dispatch({ type: 'closePack' })}
           onDelete={onDeleteSticker}
@@ -308,6 +317,7 @@ export default function App() {
         <PackCanvas
           pack={active}
           staged={state.staged}
+          shelfLoading={state.shelfLoading}
           uploading={state.uploading}
           encoding={state.encoding}
           errors={state.errors}
@@ -352,7 +362,8 @@ export default function App() {
 
       {pickerOpen && active && (
         <StickerPicker
-          stickers={allStickers}
+          stickers={allStickers ?? []}
+          loading={allStickers == null}
           exclude={active.jobIds}
           onPick={onPickExisting}
           onClose={() => setPickerOpen(false)}

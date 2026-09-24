@@ -207,7 +207,8 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
       border: !!body.border
     }
   }
-  const speed = Math.min(4, Math.max(0.25, Number(body.speed) || 1))
+  // Up to 8×: the editor offers it, and at 8× six sticker seconds cover 48s of source.
+  const speed = Math.min(8, Math.max(0.25, Number(body.speed) || 1))
   const start = Math.max(0, Number(body.start) || 0)
   // Slow motion stretches the timeline, so the legal source span grows with speed
   // and shrinks below 1× — otherwise a 0.5× pass would silently emit a 12s sticker.

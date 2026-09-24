@@ -14,8 +14,10 @@ export default function StickerLibrary({
   onBack,
   onDelete,
   onSetEmojis,
+  loading = false,
 }: {
   stickers: StickerView[]
+  loading?: boolean
   packsByJob: Record<string, string[]>   // jobId → names of packs containing it
   onBack: () => void
   onDelete: (s: StickerView) => void
@@ -42,7 +44,18 @@ export default function StickerLibrary({
         )}
       </div>
 
-      {stickers.length === 0 && (
+      {loading && (
+        <div className="grid" aria-busy="true">
+          {[0, 1, 2, 3, 4, 5].map(i => (
+            <div key={i} className="card skel-card">
+              <div className="thumb square skeleton" />
+              <div className="card-body"><span className="skel-line" style={{ width: '65%' }} /></div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && stickers.length === 0 && (
         <div className="empty-state">
           <div className="empty-box">
             <div className="empty-icon">🗂️</div>

@@ -199,3 +199,30 @@ test('matchesQuery: search matches the name of a pack the sticker belongs to', (
   assert.equal(matchesQuery(sampleSticker, 'memes', ['Best Memes']), true)
   assert.equal(matchesQuery(sampleSticker, 'memes', ['Cats']), false)
 })
+
+test('home knows the difference between "loading" and "no packs"', () => {
+  assert.equal(initialState().packsLoaded, false)
+  assert.equal(reducer(initialState(), { type: 'setPacks', packs: [] }).packsLoaded, true)
+})
+
+test('a pack opens with its shelf already filled from the cached uploads', () => {
+  const inPack = { ...pack('abc'), stickers: [{ fileId: 'used' }] as never }
+  const files = [{ id: 'used' }, { id: 'fresh' }] as FileRecord[]
+  const s = reducer(base({ packs: [inPack], files }), { type: 'openPack', code: 'abc' })
+  assert.deepEqual(s.staged.map(f => f.id), ['fresh'])
+  assert.equal(s.shelfLoading, false)
+})
+
+test('with nothing cached the shelf holds its place until the first fetch', () => {
+  const s = reducer(base({ packs: [pack('abc')], files: null }), { type: 'openPack', code: 'abc' })
+  assert.equal(s.shelfLoading, true)
+  assert.equal(reducer(s, { type: 'setStaged', files: [] }).shelfLoading, false)
+})
+
+test('uploads and discards keep the cached uploads in step', () => {
+  const s0 = base({ files: [{ id: 'a' }] as FileRecord[] })
+  const s1 = reducer(s0, { type: 'staged', files: [{ id: 'b' }] as FileRecord[] })
+  assert.deepEqual(s1.files!.map(f => f.id), ['a', 'b'])
+  const s2 = reducer(s1, { type: 'discard', fileId: 'a' })
+  assert.deepEqual(s2.files!.map(f => f.id), ['b'])
+})

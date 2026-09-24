@@ -23,7 +23,7 @@ function squareInside(r: CropRect): CropRect {
  */
 export type EditorMode = 'short' | 'long' | 'custom'
 const LONG_FPS = 15
-const SPEEDS = [1, 1.25, 1.5, 2]
+const SPEEDS = [1, 1.25, 1.5, 2, 3, 4, 6, 8]
 /** Budget failures shrink the preset window to what the encoder measured would fit. */
 const FIT_ATTEMPTS = 4
 

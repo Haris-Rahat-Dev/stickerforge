@@ -389,6 +389,9 @@ body::after {
 
 .fps-row { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .fps-row .ctl-label { margin-top: 0; }
+/* Eight speeds don't fit a phone's width in one row. */
+.fps-row .seg { flex-wrap: wrap; }
+.fps-row .seg-btn { flex: 1 0 auto; padding-inline: 8px; }
 .fps-note { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .est-actions { display: flex; gap: 8px; }
 .est-inline { margin-left: 8px; }
@@ -571,7 +574,7 @@ select {
 .tl-zoom-range { width: 92px; accent-color: var(--green); }
 .tl-span-bad { color: var(--amber); font-weight: 600; }
 
-.tl-transport { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tl-transport { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .tl-transport .tl-play { min-width: 34px; font-size: 13px; }
 .tl-step { min-width: 30px; font-size: 12px; }
 .tl-time { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); font-variant-numeric: tabular-nums; }
@@ -645,6 +648,31 @@ select {
   animation: sf-shimmer 1.2s linear infinite;
 }
 @keyframes sf-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* Loading states: shimmer where content will land, then fade the real thing in.
+   A tile whose image hasn't arrived yet shimmers instead of sitting black. */
+.fade-img { opacity: 0; transition: opacity 0.25s ease; }
+.fade-img.is-ready { opacity: 1; }
+.thumb:has(> .fade-img:not(.is-ready)) {
+  background: linear-gradient(100deg, var(--panel-2) 30%, var(--line-hot) 50%, var(--panel-2) 70%);
+  background-size: 200% 100%;
+  animation: sf-shimmer 1.2s linear infinite;
+}
+.skel-line {
+  display: block; height: 11px; border-radius: 4px; margin: 4px 0;
+  background: linear-gradient(100deg, var(--panel-2) 30%, var(--line-hot) 50%, var(--panel-2) 70%);
+  background-size: 200% 100%;
+  animation: sf-shimmer 1.2s linear infinite;
+}
+.toolbar .skel-line { height: 34px; border-radius: 8px; margin: 0; }
+.skel-card { cursor: default; pointer-events: none; }
+/* Placeholders appear at once — the cards' die-cut entrance would hide them while they're needed. */
+.grid > .card.skel-card, .shelf-rail > .shelf-card:has(> .skeleton) { animation: none; }
+.skel-card:hover { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .thumb.skeleton, .skel-line, .thumb:has(> .fade-img:not(.is-ready)) { animation: none; }
+  .fade-img { transition: none; }
+}
 
 /* ── pack bar: build progress ───────────────────────────── */
 .content { padding-bottom: 84px; }

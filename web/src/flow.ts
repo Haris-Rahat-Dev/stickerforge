@@ -8,6 +8,16 @@ export interface FlowState {
   route: Route
   activeCode: string | null
   packs: PackSummary[]
+  /** False until the first packs fetch lands — home shows placeholders, not "no packs". */
+  packsLoaded: boolean
+  /**
+   * Every uploaded source, cached. null = not fetched yet. Opening a pack derives its
+   * shelf from this at once, so the shelf and the sheet appear together instead of the
+   * shelf popping in ~0.4s later and shoving the sheet down.
+   */
+  files: FileRecord[] | null
+  /** The shelf is waiting on its first files fetch (only when nothing is cached). */
+  shelfLoading: boolean
   /** Sources uploaded but not yet committed as stickers. The staging shelf. */
   staged: FileRecord[]
   uploading: UploadProgress[]
@@ -22,6 +32,7 @@ export interface FlowState {
 
 export type Action =
   | { type: 'setPacks'; packs: PackSummary[] }
+  | { type: 'setFiles'; files: FileRecord[] }
   | { type: 'openPack'; code: string }
   | { type: 'closePack' }
   | { type: 'openStickers' }
@@ -51,9 +62,17 @@ const drop = <T,>(obj: Record<string, T>, key: string): Record<string, T> => {
 export function reducer(s: FlowState, a: Action): FlowState {
   switch (a.type) {
     case 'setPacks':
-      return { ...s, packs: a.packs }
-    case 'openPack':
-      return { ...s, route: 'pack', activeCode: a.code, buildError: null }
+      return { ...s, packs: a.packs, packsLoaded: true }
+    case 'setFiles':
+      return { ...s, files: a.files }
+    case 'openPack': {
+      const pack = s.packs.find(p => p.code === a.code)
+      return {
+        ...s, route: 'pack', activeCode: a.code, buildError: null,
+        staged: s.files ? shelfFiles(s.files, pack?.stickers.map(x => x.fileId) ?? []) : [],
+        shelfLoading: s.files == null,
+      }
+    }
     case 'closePack':
       // Staged sources belong to the canvas session, not the app. Leaving drops them
       // from view; the files themselves stay on the server until discarded or built.
@@ -61,10 +80,17 @@ export function reducer(s: FlowState, a: Action): FlowState {
     case 'openStickers':
       return { ...s, route: 'stickers', activeCode: null, staged: [], installOpen: false }
     case 'staged':
-      return { ...s, staged: [...s.staged, ...a.files] }
+      return { ...s, staged: [...s.staged, ...a.files], files: s.files ? [...s.files, ...a.files] : s.files }
     case 'setStaged':
-      return { ...s, staged: a.files }
+      return { ...s, staged: a.files, shelfLoading: false }
     case 'discard':
+      return {
+        ...s,
+        staged: s.staged.filter(f => f.id !== a.fileId),
+        files: s.files ? s.files.filter(f => f.id !== a.fileId) : s.files,
+        encoding: drop(s.encoding, a.fileId),
+        errors: drop(s.errors, a.fileId),
+      }
     case 'committed':
       return {
         ...s,
@@ -112,6 +138,9 @@ export const initialState = (): FlowState => ({
   route: 'packs',
   activeCode: null,
   packs: [],
+  packsLoaded: false,
+  files: null,
+  shelfLoading: false,
   staged: [],
   uploading: [],
   encoding: {},
