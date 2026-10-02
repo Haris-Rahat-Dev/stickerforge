@@ -7,22 +7,24 @@ import android.content.UriMatcher;
 import android.content.res.AssetFileDescriptor;
 import android.database.Cursor;
 import android.database.MatrixCursor;
-import android.database.MergeCursor;
 import android.net.Uri;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
 /**
- * Dynamic StickerContentProvider — serves sticker packs that were downloaded
- * from the StickerForge API into filesDir/stickers/. Contract strings and
+ * Dynamic StickerContentProvider — serves every sticker pack downloaded from the
+ * StickerForge API, each in filesDir/stickers/&lt;identifier&gt;/. Contract strings and
  * URI structure follow WhatsApp's official sample exactly.
  */
 public class StickerContentProvider extends ContentProvider {
@@ -75,30 +77,46 @@ public class StickerContentProvider extends ContentProvider {
         return true;
     }
 
-    private File packDir() {
-        return new File(Objects.requireNonNull(getContext()).getFilesDir(), "stickers");
+    private File root() {
+        return new File(Objects.requireNonNull(getContext()).getFilesDir(), STICKERS);
     }
 
-    /** Reads the downloaded manifest. Returns null when no pack has been fetched yet. */
-    private JSONObject readManifest() {
-        try {
-            File f = new File(packDir(), "manifest.json");
-            if (!f.exists()) return null;
-            byte[] buf = new byte[(int) f.length()];
-            try (FileInputStream in = new FileInputStream(f)) {
-                int read = in.read(buf);
-                if (read <= 0) return null;
-            }
-            return new JSONObject(new String(buf));
+    /** The pack's downloaded manifest, or null if it was never (fully) fetched. */
+    private static JSONObject readManifest(File dir) {
+        File f = new File(dir, "manifest.json");
+        if (!f.isFile()) return null;
+        try (FileInputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = in.read(buf)) > 0) out.write(buf, 0, read);
+            JSONObject json = new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));
+            return dir.getName().equals(json.optString("identifier")) ? json : null;
         } catch (Exception e) {
             return null;
         }
     }
 
+    /** Manifest for one identifier; a bare folder name only, so a URI can't walk out of root. */
+    private JSONObject manifestFor(String identifier) {
+        if (identifier == null || identifier.isEmpty() || identifier.contains("/") || identifier.contains("..")) return null;
+        return readManifest(new File(root(), identifier));
+    }
+
+    private List<JSONObject> allManifests() {
+        List<JSONObject> out = new ArrayList<>();
+        File[] dirs = root().listFiles(File::isDirectory);
+        if (dirs == null) return out;
+        Arrays.sort(dirs);
+        for (File dir : dirs) {
+            JSONObject m = readManifest(dir);
+            if (m != null) out.add(m);
+        }
+        return out;
+    }
+
     @Override
     public Cursor query(android.net.Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
-        JSONObject manifest = readManifest();
-        if (manifest == null) manifest = new JSONObject();
         final int code = MATCHER.match(uri);
 
         if (code == METADATA_CODE || code == METADATA_CODE_FOR_SINGLE_PACK) {
@@ -110,7 +128,13 @@ public class StickerContentProvider extends ContentProvider {
                     LICENSE_AGREEMENT_WEBSITE, IMAGE_DATA_VERSION, AVOID_CACHE,
                     ANIMATED_STICKER_PACK
             });
-            if (manifest.has("identifier")) {
+            List<JSONObject> packs = new ArrayList<>();
+            if (code == METADATA_CODE) packs = allManifests();
+            else {
+                JSONObject one = manifestFor(uri.getLastPathSegment());
+                if (one != null) packs.add(one);
+            }
+            for (JSONObject manifest : packs) {
                 MatrixCursor.RowBuilder b = cursor.newRow();
                 b.add(manifest.optString("identifier"));
                 b.add(manifest.optString("name"));
@@ -134,7 +158,8 @@ public class StickerContentProvider extends ContentProvider {
             MatrixCursor cursor = new MatrixCursor(new String[]{
                     STICKER_FILE_NAME_IN_QUERY, STICKER_FILE_EMOJI_IN_QUERY, STICKER_FILE_ACCESSIBILITY_TEXT_IN_QUERY
             });
-            JSONArray stickers = manifest.optJSONArray("stickers");
+            JSONObject manifest = manifestFor(uri.getLastPathSegment());
+            JSONArray stickers = manifest == null ? null : manifest.optJSONArray("stickers");
             if (stickers != null) {
                 for (int i = 0; i < stickers.length(); i++) {
                     JSONObject s = stickers.optJSONObject(i);
@@ -164,8 +189,8 @@ public class StickerContentProvider extends ContentProvider {
         final String identifier = seg.get(1);
         final String fileName = seg.get(2);
 
-        JSONObject manifest = readManifest();
-        if (manifest == null || !identifier.equals(manifest.optString("identifier"))) {
+        JSONObject manifest = manifestFor(identifier);
+        if (manifest == null) {
             throw new FileNotFoundException("Unknown pack: " + identifier);
         }
 
@@ -181,7 +206,7 @@ public class StickerContentProvider extends ContentProvider {
         }
         if (!allowed) throw new FileNotFoundException("File not in manifest: " + fileName);
 
-        File f = new File(packDir(), fileName);
+        File f = new File(new File(root(), identifier), fileName);
         if (!f.exists()) throw new FileNotFoundException("Missing: " + fileName);
         return new AssetFileDescriptor(ParcelFileDescriptorOpen(f), 0, f.length());
     }

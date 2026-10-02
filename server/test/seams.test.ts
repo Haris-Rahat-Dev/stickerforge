@@ -4,11 +4,20 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { blankEdges, hardCuts, isBlank, planSeams, shotBetween } from '../src/seams.ts'
+import { blankEdges, hardCuts, isBlank, planSeams, seamFps, shotBetween } from '../src/seams.ts'
 
 const frame = (v: number): Uint8Array => new Uint8Array(256).fill(v)
 // A textured frame: a gradient offset by `v`, so it is never "blank".
 const tex = (v: number): Uint8Array => Uint8Array.from({ length: 256 }, (_, i) => (i + v) % 256)
+
+test('seams sample the source once per sticker frame', () => {
+  // 2× at 30fps shows every other source frame at 1/30 steps: 15 per source second.
+  assert.equal(seamFps(30, 2), 15)
+  assert.equal(seamFps(24, 1), 24)
+  // Slow motion shows source frames more densely, capped at the decode grid.
+  assert.equal(seamFps(30, 0.25), 60)
+  assert.equal(seamFps(24, 8), 3)
+})
 
 test('blank means uniform, not dark', () => {
   assert.equal(isBlank(frame(0)), true)

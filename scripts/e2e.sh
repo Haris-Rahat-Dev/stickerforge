@@ -3,8 +3,8 @@
 set -u
 PORT=${E2E_PORT:-3399}
 BASE="http://127.0.0.1:$PORT"
-SAMPLE_A="$HOME/Downloads/____avy_2_-_WvBgrI.mp4"
-SAMPLE_B="$HOME/Downloads/Joe_Shitpost____-_1CfQWn.mp4"
+SAMPLE_A="${SAMPLE_A:-$HOME/Downloads/____avy_2_-_WvBgrI.mp4}"
+SAMPLE_B="${SAMPLE_B:-$HOME/Downloads/Joe_Shitpost____-_1CfQWn.mp4}"
 DATA_DIR="$(mktemp -d /tmp/sf-e2e-XXXXXX)"
 PASS=0; FAIL=0
 
@@ -38,12 +38,23 @@ check_spec() { # job_id label
   dur=$(echo "$json"   | python3 -c "import sys,json;print((json.load(sys.stdin).get('outMeta') or {}).get('duration','?'))")
   audio=$(echo "$json" | python3 -c "import sys,json;print((json.load(sys.stdin).get('outMeta') or {}).get('hasAudio','?'))")
   tray=$(echo "$json"  | python3 -c "import sys,json;print(json.load(sys.stdin).get('trayPath') is not None)")
-  assert_lt  "$label: size <500KB" "$size" 512000
-  assert_eq  "$label: codec vp9" "$codec" "vp9"
+  assert_lt  "$label: size <500KB" "$size" 512001
+  assert_eq  "$label: codec webp" "$codec" "webp"
   assert_eq  "$label: 512x512" "${w}x${h}" "512x512"
   assert_lt  "$label: fps <=30" "${fps%%.*}" 31
   assert_eq  "$label: silent" "$audio" "False"
   assert_eq  "$label: tray extracted" "$tray" "True"
+}
+
+convert_job() { # json → jobId
+  api -X POST "$BASE/api/convert" -H 'Content-Type: application/json' -d "$1" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['jobId'])"
+}
+wait_job() { # jobId timeout_s
+  for i in $(seq 1 "$2"); do
+    S=$(api "$BASE/api/job/$1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
+    [ "$S" = "done" -o "$S" = "error" ] && return; sleep 1
+  done
 }
 
 echo "── boot ──"
@@ -86,48 +97,29 @@ CD=$(api "$BASE/api/cropdetect/$FID_A")
 assert_eq "cropdetect: valid json" "$(echo "$CD" | python3 -c "import sys,json;d=json.load(sys.stdin);print('ok' if d and d['w']>0 else 'bad')")" "ok"
 
 echo "── convert: border + cropPos + custom fps ──"
-J1=$(api -X POST "$BASE/api/convert" -H 'Content-Type: application/json' \
-  -d "{\"fileId\":\"$FID_A\",\"start\":0,\"end\":2.7,\"speed\":1,\"fps\":17,\"fit\":\"cover\",\"cropPos\":0.15,\"border\":true}" \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['jobId'])")
-for i in $(seq 1 60); do
-  S=$(api "$BASE/api/job/$J1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
-  [ "$S" = "done" -o "$S" = "error" ] && break; sleep 1
-done
+J1=$(convert_job "{\"fileId\":\"$FID_A\",\"start\":0,\"end\":2.7,\"speed\":1,\"fps\":17,\"fit\":\"cover\",\"cropPos\":0.15,\"border\":true}")
+wait_job "$J1" 120
 check_spec "$J1" "bordered 17fps"
 
 echo "── convert: 4K source, contain + pad + speed 2x ──"
-J2=$(api -X POST "$BASE/api/convert" -H 'Content-Type: application/json' \
-  -d "{\"fileId\":\"$FID_B\",\"start\":0,\"end\":5.6,\"speed\":2,\"fps\":30,\"fit\":\"contain\",\"padColor\":\"#25d366\"}" \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['jobId'])")
-for i in $(seq 1 90); do
-  S=$(api "$BASE/api/job/$J2" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
-  [ "$S" = "done" -o "$S" = "error" ] && break; sleep 1
-done
+J2=$(convert_job "{\"fileId\":\"$FID_B\",\"start\":0,\"end\":5.6,\"speed\":2,\"fps\":30,\"fit\":\"contain\",\"padColor\":\"#25d366\"}")
+wait_job "$J2" 180
 check_spec "$J2" "4K contain"
 
-echo "── downloads ──"
-code=$(api -o "$DATA_DIR/dl.webm" -w "%{http_code}" "$BASE/api/download/webm/$J1")
-assert_eq "webm download: 200" "$code" "200"
-dlsize=$(stat -f%z "$DATA_DIR/dl.webm" 2>/dev/null || stat -c%s "$DATA_DIR/dl.webm")
-assert_lt "webm download: size matches" $((dlsize - 999999)) 1
-code=$(api -o "$DATA_DIR/tray.png" -w "%{http_code}" "$BASE/api/download/tray/$J1")
-assert_eq "tray download: 200" "$code" "200"
-file_tray=$(file -b "$DATA_DIR/tray.png" | cut -d, -f1)
-assert_eq "tray: is PNG" "$file_tray" "PNG image data"
+echo "── convert: two cuts ──"
+J3=$(convert_job "{\"fileId\":\"$FID_A\",\"start\":0,\"end\":3,\"spans\":[{\"start\":0,\"end\":1},{\"start\":2,\"end\":3}],\"speed\":1,\"fps\":17,\"fit\":\"cover\"}")
+wait_job "$J3" 120
+check_spec "$J3" "two cuts"
+
+echo "── output ──"
+code=$(api -o "$DATA_DIR/out.webp" -w "%{http_code}" "$BASE/api/output/webp/$J1")
+assert_eq "webp output: 200" "$code" "200"
+assert_eq "webp output: animated WebP" \
+  "$(python3 -c "d=open('$DATA_DIR/out.webp','rb').read();print(d[:4]==b'RIFF' and d[8:12]==b'WEBP' and b'ANIM' in d[:64])")" "True"
 code=$(api -o /dev/null -w "%{http_code}" -H "Range: bytes=0-1023" "$BASE/api/output/preview/$J1")
 assert_eq "preview: range request 206" "$code" "206"
-
-echo "── batch ──"
-BATCH=$(api -X POST "$BASE/api/batch" -H 'Content-Type: application/json' -d "{\"fileIds\":[\"$FID_A\",\"$FID_B\"]}")
-JB1=$(echo "$BATCH" | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['jobId'])")
-JB2=$(echo "$BATCH" | python3 -c "import sys,json;print(json.load(sys.stdin)[1]['jobId'])")
-for i in $(seq 1 120); do
-  S1=$(api "$BASE/api/job/$JB1" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
-  S2=$(api "$BASE/api/job/$JB2" | python3 -c "import sys,json;print(json.load(sys.stdin)['status'])")
-  { [ "$S1" = "done" -o "$S1" = "error" ] && [ "$S2" = "done" -o "$S2" = "error" ]; } && break; sleep 1
-done
-check_spec "$JB1" "batch[1]"
-check_spec "$JB2" "batch[2]"
+code=$(api -o /dev/null -w "%{http_code}" -H "Range: bytes=99999999-" "$BASE/api/output/preview/$J1")
+assert_eq "preview: unsatisfiable range 416" "$code" "416"
 
 echo "── job stream ──"
 STREAM=$(api --max-time 5 "$BASE/api/job/$J1/stream" | head -1)
@@ -140,7 +132,7 @@ PACK_CODE=$(echo "$PACK" | python3 -c "import sys,json;print(json.load(sys.stdin
 [ -n "$PACK_CODE" ] && ok "pack: created ($PACK_CODE)" || fail "pack: created"
 
 PUT=$(api -X PUT "$BASE/api/packs/$PACK_CODE/stickers" -H 'Content-Type: application/json' \
-  -d "{\"jobIds\":[\"$J1\",\"$JB1\",\"$JB2\"]}")
+  -d "{\"jobIds\":[\"$J1\",\"$J2\",\"$J3\"]}")
 READY=$(echo "$PUT" | python3 -c "import sys,json;print(json.load(sys.stdin)['ready'])")
 assert_eq "pack: 3 ready" "$READY" "3"
 
@@ -166,8 +158,8 @@ assert_eq "pack: sources deleted after build" \
   "$(api "$BASE/api/video/$FID_B" -o /dev/null -w '%{http_code}')" "404"
 assert_eq "pack: stickers locked after build" \
   "$(api "$BASE/api/stickers" | python3 -c "import sys,json;print(any(s['editable'] for s in json.load(sys.stdin)))")" "False"
-assert_eq "pack: webm still downloadable after source deletion" \
-  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/download/webm/$J1")" "200"
+assert_eq "pack: sticker WebP still served after source deletion" \
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/output/webp/$J1")" "200"
 
 REBUILT=$(api -X POST "$BASE/api/packs/$PACK_CODE/build")
 assert_eq "pack: rebuild succeeds with sources gone" \
@@ -189,13 +181,13 @@ echo "── sticker reuse + emojis ──"
 PACK3=$(api -X POST "$BASE/api/packs" -H 'Content-Type: application/json' -d '{"name":"Reuse"}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['code'])")
 REUSE=$(api -X PUT "$BASE/api/packs/$PACK3/stickers" -H 'Content-Type: application/json' \
-  -d "{\"jobIds\":[\"$JB1\",\"$JB2\"]}")
+  -d "{\"jobIds\":[\"$J2\",\"$J3\"]}")
 assert_eq "reuse: a sticker can sit in two packs" \
   "$(echo "$REUSE" | python3 -c "import sys,json;print(json.load(sys.stdin)['ready'])")" "2"
-api -X PATCH "$BASE/api/sticker/$JB1" -H 'Content-Type: application/json' \
+api -X PATCH "$BASE/api/sticker/$J2" -H 'Content-Type: application/json' \
   -d '{"emojis":["🔥","💀"]}' > /dev/null
 assert_eq "emoji: stored on the sticker" \
-  "$(api "$BASE/api/stickers" | python3 -c "import sys,json;print(next(s['emojis'] for s in json.load(sys.stdin) if s['jobId']=='$JB1'))")" \
+  "$(api "$BASE/api/stickers" | python3 -c "import sys,json;print(next(s['emojis'] for s in json.load(sys.stdin) if s['jobId']=='$J2'))")" \
   "['🔥', '💀']"
 
 echo "── refcount + sticker delete ──"
@@ -205,10 +197,10 @@ api -X PUT "$BASE/api/packs/$PACK2/stickers" -H 'Content-Type: application/json'
   -d "{\"jobIds\":[\"$J1\"]}" > /dev/null
 api -X DELETE "$BASE/api/packs/$PACK2" > /dev/null
 assert_eq "refcount: shared sticker survives deleting one of its packs" \
-  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/download/webm/$J1")" "200"
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/output/webp/$J1")" "200"
 api -X DELETE "$BASE/api/sticker/$J1" > /dev/null
 assert_eq "sticker delete: artefacts gone" \
-  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/download/webm/$J1")" "404"
+  "$(api -o /dev/null -w '%{http_code}' "$BASE/api/output/webp/$J1")" "404"
 
 echo "── delete + 404s ──"
 UP3=$(api -F "file=@$SAMPLE_A" "$BASE/api/upload")

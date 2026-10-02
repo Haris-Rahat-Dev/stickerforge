@@ -7,12 +7,12 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
 import { extractTray, buildFilters } from './convert.js'
-import { convertToAnimatedWebp, encodeSignal, estimateSticker, imageToAnimatedWebp, measureSpanBytes, probeHoldCount, WebpBudgetError, type WebpResult } from './webp.js'
-import { capFps, fitSpanSeconds, maxSrcSpanForSpeed, MAX_STICKER_SEC, openingTrimEnd, secondsThatFit } from './budget.js'
+import { convertToAnimatedWebp, encodeSignal, estimateSticker, imageToAnimatedWebp, WebpBudgetError, type WebpResult } from './webp.js'
+import { capFps, maxSrcSpanForSpeed } from './budget.js'
 import { keptSeconds, normalizeSpans, type Span } from './spans.js'
 import { createLimiter } from './queue.js'
 import { reapOrphans } from './reap.js'
-import { planSeams } from './seams.js'
+import { planSeams, seamFps } from './seams.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
   createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion,
   countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
@@ -55,13 +55,16 @@ const publishJob = (job: Job): void => publish({
   fitSeconds: job.fitSeconds,
 })
 
-// Safety net: a stray rejected promise (e.g. an ffmpeg failure in an async route)
-// must never take the whole server down. Log and keep serving. Deliberate tradeoff:
-// after an uncaughtException the process may be in an unknown state, and for a
-// single-user local tool a degraded server beats a dead one — but in-flight encodes
-// are not guaranteed consistent, so a restart is the fix if anything looks wrong.
+// A stray rejected promise (e.g. an ffmpeg failure in an async route) is logged and
+// the server keeps going: it cannot have left shared state half-written.
 process.on('unhandledRejection', err => console.error('unhandledRejection:', err))
-process.on('uncaughtException', err => console.error('uncaughtException:', err))
+// A synchronous throw nobody caught leaves the process in an unknown state. Files, done
+// jobs and packs are persisted, so exiting for the supervisor (systemd Restart=, Docker
+// --restart) to bring back is safer than serving on.
+process.on('uncaughtException', err => {
+  console.error('uncaughtException — exiting:', err)
+  process.exit(1)
+})
 
 const app = express()
 app.use(express.json())
@@ -92,8 +95,12 @@ const upload = multer({
     destination: UPLOADS,
     filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname) || '.mp4'}`)
   }),
-  limits: { fileSize: 2 * 1024 * 1024 * 1024 }
+  limits: { fileSize: 1024 * 1024 * 1024 }
 })
+// ponytail: a flat per-user cap on uncommitted uploads keeps one account from filling the
+// VM's disk. Built packs delete their sources, so normal use never meets it; make it
+// per-plan if accounts ever pay.
+const STAGED_QUOTA_BYTES = 3 * 1024 * 1024 * 1024
 
 const files = new Map<string, FileRecord>()
 const jobs = new Map<string, Job>()
@@ -125,14 +132,23 @@ for (const job of loadJobs()) {
 // Drafts the user never took into a pack (tab closed mid-review). A day's grace so a
 // restart doesn't yank one someone is looking at right now.
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1000
-let staleDrafts = 0
-for (const job of [...jobs.values()]) {
-  if (job.draft && Date.now() - job.startedAt > DRAFT_TTL_MS && countPacksWithJob(job.id) === 0) {
-    discardSticker(job.id)
-    staleDrafts++
+function sweepDrafts(when: string): void {
+  let stale = 0
+  for (const job of [...jobs.values()]) {
+    if (job.draft && job.status !== 'running' && Date.now() - job.startedAt > DRAFT_TTL_MS && countPacksWithJob(job.id) === 0) {
+      discardSticker(job.id)
+      stale++
+    }
   }
+  if (stale) console.log(`${when}: discarded ${stale} unreviewed draft encode(s)`)
 }
-if (staleDrafts) console.log(`boot: discarded ${staleDrafts} unreviewed draft encode(s)`)
+sweepDrafts('boot')
+// A long-running server would otherwise only reclaim abandoned drafts on its next restart.
+setInterval(() => sweepDrafts('sweep'), 60 * 60 * 1000).unref()
+// Scratch dirs of encodes a crash or kill interrupted; nothing reads them after a restart.
+for (const name of fs.readdirSync(os.tmpdir())) {
+  if (/^sf-(webp|loop)-/.test(name)) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true })
+}
 if (missingFiles.length || missingJobs.length) {
   // A drop here means lost work, so it must never be silent: an unusable stored path
   // and a deliberately-deleted source look the same from here.
@@ -156,8 +172,11 @@ if (reaped.removed.length) {
   console.log(`boot: reclaimed ${(reaped.bytes / 1024 / 1024).toFixed(1)}MB of unreachable media (${reaped.removed.length} file(s))`)
 }
 
-// Cap concurrent encodes so N parallel two-pass VP9 jobs don't starve each other.
+// Cap concurrent encodes so parallel jobs don't starve each other (or a 1 GB VM's RAM).
 const encodeQueue = createLimiter(2)
+// The editor's own ffmpeg work — estimates, seams, filmstrips, cropdetect — shares a
+// separate small cap, so a few busy tabs can't stack decodes on top of two encodes.
+const probeQueue = createLimiter(2)
 
 // Owner-scoped lookups: a user only ever sees their own files/jobs.
 const ownedFile = (req: express.Request, id: string): FileRecord | null => {
@@ -241,6 +260,12 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
 app.post('/api/upload', upload.single('file'), ah(async (req, res) => {
   try {
     if (!req.file) { res.status(400).json({ error: 'No file provided' }); return }
+    const staged = [...files.values()].filter(f => f.owner === req.userId).reduce((s, f) => s + f.sizeBytes, 0)
+    if (staged + req.file.size > STAGED_QUOTA_BYTES) {
+      fs.rmSync(req.file.path, { force: true })
+      res.status(413).json({ error: 'Too many uploads waiting — build a pack or discard some first' })
+      return
+    }
     const { meta, kind } = await probeMedia(req.file.path)
     const id = req.file.filename
     const record: FileRecord = {
@@ -280,11 +305,16 @@ app.delete('/api/file/:id', (req, res) => {
 
 function streamFile(req: express.Request, res: express.Response, filePath: string, mime: string): void {
   const stat = fs.statSync(filePath)
-  const range = req.headers.range
+  const range = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range)
   if (range) {
-    const [s, e] = range.replace(/bytes=/, '').split('-')
-    const start = parseInt(s, 10)
-    const end = e ? parseInt(e, 10) : Math.min(start + 4 * 1024 * 1024, stat.size - 1)
+    const [, s, e] = range
+    // "bytes=-N" is the last N bytes; an open end serves 4MB at a time.
+    const start = s === '' ? Math.max(0, stat.size - Number(e)) : Number(s)
+    const end = s === '' ? stat.size - 1 : Math.min(e ? Number(e) : start + 4 * 1024 * 1024, stat.size - 1)
+    if (!(start <= end && start < stat.size)) {
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` }).end()
+      return
+    }
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${stat.size}`,
       'Accept-Ranges': 'bytes',
@@ -327,17 +357,17 @@ app.get('/api/filmstrip/:id', ah(async (req, res) => {
       const duration = Math.max(rec.meta.duration, 0.5)
       const n = Math.min(80, Math.max(8, Math.ceil(duration * 4)))
       const fpsArg = n / duration
-      await new Promise<void>((resolve, reject) => {
+      await probeQueue.run(() => new Promise<void>((resolve, reject) => {
         const p = spawn('ffmpeg', [
           '-i', rec.path,
           '-vf', `fps=${fpsArg.toFixed(4)},scale=-2:${FILM_H},tile=${n}x1`,
           '-q:v', '4',
           '-frames:v', '1',
           '-y', out
-        ])
+        ], { timeout: 120_000, killSignal: 'SIGKILL' })
         p.on('close', (c: number | null) => c === 0 ? resolve() : reject(new Error(`filmstrip failed (${c})`)))
         p.on('error', reject)
-      })
+      }))
     }
     res.sendFile(out)
   } catch {
@@ -350,36 +380,9 @@ app.get('/api/cropdetect/:id', ah(async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   if (!rec.suggestedCrop) {
-    rec.suggestedCrop = await detectCrop(rec.path, rec.meta).catch(() => null)
+    rec.suggestedCrop = await probeQueue.run(() => detectCrop(rec.path, rec.meta)).catch(() => null)
   }
   res.json(rec.suggestedCrop)
-}))
-
-// One 16×16 pass, then eight real frames. If those already miss 500KB, the
-// trim that opens is the shorter one — not the optimistic 4KB-per-frame guess.
-app.get('/api/fit-span/:id', ah(async (req, res) => {
-  const rec = ownedFile(req, req.params.id)
-  if (!rec) { res.status(404).json({ error: 'Not found' }); return }
-  const fallback = openingTrimEnd(rec.meta.duration, rec.meta.fps)
-  if (rec.kind === 'image') { res.json({ seconds: rec.meta.duration }); return }
-  const fps = capFps(rec.meta.fps)
-  const window = Math.max(0.1, Math.min(rec.meta.duration, MAX_STICKER_SEC))
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-span-'))
-  try {
-    const held = await probeHoldCount(rec.path, 0, window, fps, '', tmp)
-    let seconds = fitSpanSeconds(rec.meta.duration, rec.meta.fps, held)
-    const span = Math.max(0.1, Math.min(seconds, rec.meta.duration))
-    const heldSpan = span + 0.05 >= window ? held : await probeHoldCount(rec.path, 0, span, fps, '', tmp)
-    const projected = await measureSpanBytes(
-      rec.path, 0, span, fps, buildFilters('contain'), heldSpan, tmp,
-    )
-    if (projected != null) seconds = secondsThatFit(span, projected)
-    res.json({ seconds })
-  } catch {
-    res.json({ seconds: fallback })
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true })
-  }
 }))
 
 function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSignal | null, controller?: AbortController, draft = false): Job {
@@ -445,7 +448,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
       return
     }
     const trayPath = path.join(TRAYS, `${jobId}.png`)
-    await extractTray(rec.path, trayPath, start, crop, cropPos)
+    await extractTray(rec.path, trayPath, settings, rec.kind)
     job.trayPath = fs.existsSync(trayPath) ? trayPath : null
     job.status = 'done'
     job.progress = 1
@@ -514,7 +517,8 @@ app.post('/api/estimate', ah(async (req, res) => {
   if (estimating.has(req.userId)) { res.json({ busy: true }); return }
   estimating.add(req.userId)
   try {
-    const est = await estimateSticker(rec.path, parseSettings(req.body, rec))
+    const settings = parseSettings(req.body, rec)
+    const est = await probeQueue.run(() => estimateSticker(rec.path, settings))
     res.json(est)
   } catch {
     res.json({ unknown: true })   // never block the editor on a projection failure
@@ -539,11 +543,11 @@ app.post('/api/seams', ah(async (req, res) => {
     const spans = s.spans.length ? s.spans : [{ start: s.start, end: s.end }]
     const only = Number.isInteger(req.body.only) ? Number(req.body.only) : null
     const cropF = s.crop ? `crop=${s.crop.w}:${s.crop.h}:${s.crop.x}:${s.crop.y},` : ''
-    res.json(await planSeams({
-      // Sped up, consecutive sticker frames are speed/fps apart in the source.
-      inputPath: rec.path, spans, duration: rec.meta.duration, fps: Math.min(60, Math.round(s.fps * s.speed)), only,
+    res.json(await probeQueue.run(() => planSeams({
+      inputPath: rec.path, spans, duration: rec.meta.duration, fps: seamFps(s.fps, s.speed), only,
       preVf: cropF + buildFilters(s.fit, s.padColor, s.cropPos, s.border),
-    }))
+      maxKept: maxSrcSpanForSpeed(s.speed),
+    })))
   } catch {
     res.json({ unknown: true })   // a failed probe must never block editing
   } finally {
@@ -617,20 +621,6 @@ app.delete('/api/job/:id', (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/download/webm/:jobId', (req, res) => {
-  const job = ownedJob(req, req.params.jobId)
-  if (!job?.outputPath.endsWith('.webm') || !fs.existsSync(job.outputPath)) { res.status(404).json({ error: 'Not found' }); return }
-  const name = (files.get(job.fileId)?.originalName || 'sticker').replace(/\.[^.]+$/, '')
-  res.download(job.outputPath, `${name}.webm`)
-})
-
-app.get('/api/download/tray/:jobId', (req, res) => {
-  const job = ownedJob(req, req.params.jobId)
-  if (!job?.trayPath || !fs.existsSync(job.trayPath)) { res.status(404).json({ error: 'Not found' }); return }
-  const name = (files.get(job.fileId)?.originalName || 'tray').replace(/\.[^.]+$/, '')
-  res.download(job.trayPath, `${name}.png`)
-})
-
 app.get('/api/output/preview/:jobId', (req, res) => {
   const job = ownedJob(req, req.params.jobId)
   if (!job || !fs.existsSync(job.outputPath)) { res.status(404).json({ error: 'Not found' }); return }
@@ -644,34 +634,6 @@ app.get('/api/output/webp/:jobId', (req, res) => {
   const file = job.kind === 'image' ? job.outputPath : webpCachePath(job.id)
   if (!fs.existsSync(file)) { res.status(404).json({ error: 'Not found' }); return }
   streamFile(req, res, file, 'image/webp')
-})
-
-app.post('/api/batch', async (req, res) => {
-  const ids = Array.isArray(req.body.fileIds) ? req.body.fileIds.map(String) : []
-  const results: Array<{ jobId: string; fileId: string }> = []
-
-  for (const id of ids) {
-    const rec = ownedFile(req, id)
-    if (!rec) continue
-
-    let settings: ConvertSettings
-    if (rec.kind === 'image') {
-      settings = { start: 0, end: IMAGE_DUR, spans: [{ start: 0, end: IMAGE_DUR }], speed: 1, fps: IMAGE_FPS, fit: 'cover', padColor: '#000000', crop: null, cropPos: 0.5, border: false }
-    } else {
-      const fps = capFps(rec.meta.fps)
-      const end = openingTrimEnd(rec.meta.duration, rec.meta.fps)
-      const detected = await detectCrop(rec.path, rec.meta).catch(() => null)
-      const crop = detected && (detected.w < rec.meta.width - 8 || detected.h < rec.meta.height - 8)
-        ? sanitizeCrop(detected, rec.meta)
-        : null
-      settings = { start: 0, end, spans: [{ start: 0, end }], speed: 1, fps, fit: 'cover', padColor: '#000000', crop, cropPos: 0.5, border: false }
-    }
-
-    const job = startJob(rec, settings, null)
-    job.stage = 'queued'
-    results.push({ jobId: job.id, fileId: id })
-  }
-  res.json(results)
 })
 
 const CODE_RE = /^[a-z0-9-]{1,32}$/
@@ -967,6 +929,7 @@ app.use((err: unknown, req: express.Request, res: express.Response, _next: expre
   const message = err instanceof Error ? err.message : 'Internal error'
   console.error(`${req.method} ${req.originalUrl} failed:`, message)
   if (res.headersSent) { res.end(); return }
+  if ((err as { code?: string }).code === 'LIMIT_FILE_SIZE') { res.status(413).json({ error: 'File is over 1GB' }); return }
   res.status(500).json({ error: message })
 })
 

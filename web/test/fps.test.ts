@@ -14,18 +14,12 @@ test('fps choices never upsample a slow source', () => {
   assert.deepEqual(fpsChoices(10), [10])
 })
 
-test('preset refit bisects towards the pessimistic q50 figure', () => {
-  // Cat at 24fps: 6s failed saying ~3.1s; 4.5s is worth trying before settling.
-  assert.equal(nextFitLength(6, 3.1, false), 4.5)
-})
-
-test('a near miss or the final try takes the safe figure', () => {
-  assert.equal(nextFitLength(4.5, 4.3, false), 4.2)
-  assert.equal(nextFitLength(6, 3.1, true), 3)
+test('preset refit takes the encoder\'s figure', () => {
+  assert.equal(nextFitLength(6, 4.26), 4.2)
 })
 
 test('refit never grows, never goes under 0.5s, and gives up when nothing is shorter', () => {
-  assert.equal(nextFitLength(1, 0.2, true), 0.5)
-  assert.equal(nextFitLength(3, 3, false), null)
-  assert.ok((nextFitLength(2, 1.95, false) ?? 0) < 2)
+  assert.equal(nextFitLength(1, 0.2), 0.5)
+  assert.equal(nextFitLength(3, 3), null)
+  assert.ok((nextFitLength(2, 1.95) ?? 0) < 2)
 })

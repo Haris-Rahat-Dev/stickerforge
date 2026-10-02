@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
+import { MAX_STICKER_SEC } from './budget.js'
 import type { CropRect, MediaKind, QualityAssessment, VideoMeta } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -60,14 +61,22 @@ export function frameRate(s: ProbeStream): number {
   return 0
 }
 
+/**
+ * Containers an upload may be. Uploads are untrusted, and ffmpeg will happily follow a
+ * playlist (HLS, ffconcat) to local files or URLs; only plain media demuxers may open them.
+ */
+const DEMUXERS = 'mov,matroska,webm,gif,avi,mpegts,flv,asf,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe,gif_pipe,apng'
+
 export async function probeVideo(filePath: string): Promise<VideoMeta> {
   const { stdout } = await execFileAsync('ffprobe', [
     '-v', 'quiet',
+    '-protocol_whitelist', 'file',
+    '-format_whitelist', DEMUXERS,
     '-print_format', 'json',
     '-show_format',
     '-show_streams',
     filePath
-  ])
+  ], { timeout: 30_000 }).catch(() => { throw new Error('Not a video or image StickerForge can read') })
   const data = JSON.parse(stdout) as {
     streams?: ProbeStream[]
     format?: { duration?: string; bit_rate?: string; size?: string }
@@ -130,8 +139,8 @@ export function assessQuality(meta: VideoMeta, kind: MediaKind = 'video'): Quali
     if (level === 'good') level = 'ok'
   }
 
-  if (meta.duration > 6.05) {
-    notes.push({ type: 'info', msg: `${meta.duration.toFixed(1)}s — trim to ≤6s needed` })
+  if (meta.duration > MAX_STICKER_SEC + 0.05) {
+    notes.push({ type: 'info', msg: `${meta.duration.toFixed(1)}s — trim to ≤${MAX_STICKER_SEC}s needed` })
   }
   if (meta.fps > 32) {
     notes.push({ type: 'info', msg: `${Math.round(meta.fps)}fps will be capped to 30` })
@@ -168,7 +177,7 @@ export function detectCrop(inputPath: string, meta: VideoMeta): Promise<CropRect
       '-i', inputPath,
       '-vf', 'cropdetect=24:2:0',
       '-f', 'null', '/dev/null'
-    ])
+    ], { timeout: 60_000, killSignal: 'SIGKILL' })
     let stderr = ''
     p.stderr.on('data', d => { stderr += d.toString() })
     p.on('close', () => {

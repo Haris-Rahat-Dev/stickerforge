@@ -6,12 +6,9 @@ Videos are processed on your StickerForge host (local machine or the deployed VM
 
 ## WhatsApp spec
 
-| Path | Format |
-|------|--------|
-| Chat / Sticker.ly import | WebM VP9, 512×512, ≤30fps, ≤6s, **&lt;500KB**, silent |
-| Third-party Android provider (`whatsapp/stickers`) | **Animated WebP**, same size/duration/fps caps |
+Third-party Android provider (`whatsapp/stickers`): **animated WebP**, 512×512, ≤10s, ≤30fps (our cap), **≤500KB**, silent.
 
-Pack minimum: **3 stickers**. Tray PNG required. Only an installed app with `StickerContentProvider` can add packs to WhatsApp (after user taps “Add to WhatsApp”). App must be WhatsApp-whitelisted for production.
+Pack: **3–30 stickers**, 1–3 emojis each. Tray PNG required (≤50KB). Only an installed app with `StickerContentProvider` can add packs to WhatsApp (after user taps “Add to WhatsApp”). App must be WhatsApp-whitelisted for production.
 
 ## Deployed setup (current)
 
@@ -92,12 +89,12 @@ Note: the image installs ffmpeg but **not** `cwebp`/`webpmux` — pack WebP expo
 
 ```
 web/                 React + Vite editor
-server/src/          Express API, SQLite, encode queue, WebM + WebP pipelines
+server/src/          Express API, SQLite, encode queue, animated WebP pipeline
 android/             Java StickerContentProvider + one-screen importer
 data/                uploads, outputs, trays, packs, stickerforge.db (gitignored)
 ```
 
-Encode preview must match ffmpeg (trim, fit, crop, borders, speed, fps). Pack build re-encodes stickers to animated WebP for the Android provider path.
+Encode preview must match ffmpeg (trim, fit, crop, borders, speed, fps). Each sticker's WebP is encoded once at Add; pack build copies them.
 
 ## Security notes
 
@@ -107,7 +104,7 @@ Encode preview must match ffmpeg (trim, fit, crop, borders, speed, fps). Pack bu
 
 ## Product decisions
 
-- Conversion stays on the server (two-pass VP9 is heavy for phones).
+- Conversion stays on the server (frame extraction + img2webp is heavy for phones).
 - Android is native Java (WhatsApp sample contract), not RN/Capacitor.
 - Provider authority: `com.stickerforge.app.stickercontentprovider`.
 - iOS: no public provider API — web download + Sticker.ly is the interim.

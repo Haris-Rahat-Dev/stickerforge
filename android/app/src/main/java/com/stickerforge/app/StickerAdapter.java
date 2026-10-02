@@ -29,12 +29,12 @@ final class StickerAdapter extends RecyclerView.Adapter<StickerAdapter.Holder> {
     }
 
     private final List<StickerSlot> slots = new ArrayList<>();
-    private final File dir;
+    private final PackLoader loader;
     private final Callback callback;
     private final int targetPx;
 
-    StickerAdapter(Context context, File packDir, Callback callback) {
-        this.dir = packDir;
+    StickerAdapter(Context context, PackLoader loader, Callback callback) {
+        this.loader = loader;
         this.callback = callback;
         this.targetPx = (int) (context.getResources().getDisplayMetrics().density * 170);
         // Pack order is fixed while a download runs, so a tile keeps its identity.
@@ -121,7 +121,7 @@ final class StickerAdapter extends RecyclerView.Adapter<StickerAdapter.Holder> {
             Context context = itemView.getContext();
             if (slot == null) return;
             final int loaderPosition = position + PackLoader.TRAY + 1;
-            shown = new File(dir, slot.fileName);
+            shown = new File(loader.packDir(), slot.fileName);
             index.setText(context.getString(R.string.slot_index, position + 1));
             emoji.setText(TextUtils.join(" ", slot.emojis));
             tile.setOnClickListener(v -> callback.onSlotClicked(loaderPosition, slot));

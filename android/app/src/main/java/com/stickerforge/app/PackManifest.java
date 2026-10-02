@@ -38,7 +38,7 @@ final class PackManifest {
         this.entries = entries;
     }
 
-    /** File names land on disk verbatim, so anything that isn't a bare name is refused. */
+    /** Names land on disk verbatim (the identifier is a folder), so anything that isn't a bare name is refused. */
     private static String safeName(String raw) throws LoadException {
         if (raw == null || raw.isEmpty() || raw.indexOf('/') >= 0 || raw.contains("..")) {
             throw new LoadException(R.string.error_manifest, LoadException.KIND_MANIFEST);
@@ -47,10 +47,10 @@ final class PackManifest {
     }
 
     static PackManifest parse(JSONObject json) throws LoadException {
-        String identifier = json.optString("identifier", "");
+        String identifier = safeName(json.optString("identifier", ""));
         String tray = safeName(json.optString("tray_image_file", ""));
         JSONArray list = json.optJSONArray("stickers");
-        if (identifier.isEmpty() || list == null || list.length() == 0) {
+        if (list == null || list.length() == 0) {
             throw new LoadException(R.string.error_manifest, LoadException.KIND_MANIFEST);
         }
         List<Entry> entries = new ArrayList<>();

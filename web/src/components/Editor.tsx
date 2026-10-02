@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, estimate, discardDraft, EncodeError, planSeams, type SeamLabel, type SeamPlan } from '../api.js'
 import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, StickerSpec } from '../types.js'
-import { capFps, fpsChoices, MAX_STICKER_SEC, motionBudget, nextFitLength } from '../budget.js'
+import { capFps, fpsChoices, MAX_STICKER_SEC, nextFitLength } from '../budget.js'
 import { keptSeconds, normalizeSpans, splitAt, type Span } from '../spans.js'
 import Timeline, { clock, sourceTimeAt } from './Timeline.jsx'
 import StickerPreview from './StickerPreview.jsx'
@@ -25,7 +25,7 @@ export type EditorMode = 'short' | 'long' | 'custom'
 const LONG_FPS = 15
 const SPEEDS = [1, 1.25, 1.5, 2, 3, 4, 6, 8]
 /** Budget failures shrink the preset window to what the encoder measured would fit. */
-const FIT_ATTEMPTS = 4
+const FIT_ATTEMPTS = 3
 
 /** Identity of an encode's settings, so a result can tell when the editor has moved on. */
 /**
@@ -191,6 +191,20 @@ export default function Editor({
     }
   }, [draftKey])
 
+  // Presets size their window with the sampled estimate before the real encode: a full
+  // encode that fails on the byte budget costs minutes on a small VM. No estimate → as is.
+  const fitPresetLength = async (m: EditorMode, start: number, len: number, ticket: number): Promise<number> => {
+    for (let i = 0; i < 3 && runRef.current === ticket; i++) {
+      const e = await estimate(presetReq(m, start, len)).catch(() => null)
+      if (e?.busy) { await new Promise(r => setTimeout(r, 500)); continue }
+      if (!e || e.fits !== false || e.maxSeconds == null) return len
+      const next = nextFitLength(len, e.maxSeconds)
+      if (next == null) return len
+      len = next
+    }
+    return len
+  }
+
   // Presets encode as soon as they're picked and whenever the window is let go.
   useEffect(() => {
     if (isImage || mode === 'custom') return
@@ -198,7 +212,8 @@ export default function Editor({
     const m = mode
     const start = presetStart
     void (async () => {
-      let len = Math.max(0.5, Math.min(MAX_STICKER_SEC, duration - start))
+      setBusy({ progress: 0, stage: 'sizing the clip' })
+      let len = await fitPresetLength(m, start, Math.max(0.5, Math.min(MAX_STICKER_SEC, duration - start)), ticket)
       for (let attempt = 1; attempt <= FIT_ATTEMPTS; attempt++) {
         if (runRef.current !== ticket) return
         setPresetLen(len)
@@ -212,9 +227,7 @@ export default function Editor({
         } catch (err) {
           const fitS = err instanceof EncodeError ? err.fitSeconds : undefined
           if (runRef.current !== ticket) return
-          const next = fitS != null && attempt < FIT_ATTEMPTS
-            ? nextFitLength(len, fitS, attempt === FIT_ATTEMPTS - 1)
-            : null
+          const next = fitS != null && attempt < FIT_ATTEMPTS ? nextFitLength(len, fitS) : null
           if (next != null) {
             len = next
             setBusy({ progress: 0, stage: `too big — trying ${len.toFixed(1)}s` })
@@ -230,9 +243,9 @@ export default function Editor({
   }, [mode, presetTick, file.id, isImage, duration]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const generate = async (): Promise<void> => {
-    // Sticker seconds (kept / speed) — the 6s cap is on the sticker. Checking the raw kept
-    // span silently swallowed Generate for any sped-up cut longer than 6s of source.
-    if (!isImage && !motionBudget(keptSeconds(spans) / speed, fps).ok) return
+    // Sticker seconds (kept / speed) — the cap is on the sticker. Checking the raw kept
+    // span silently swallowed Generate for any sped-up cut longer than the cap of source.
+    if (!isImage && tooLong) return
     const ticket = ++runRef.current
     try {
       const d = await encodeDraft(customReq, ticket)
@@ -438,10 +451,10 @@ export default function Editor({
     return () => window.removeEventListener('keydown', onKey)
   }, [isImage])
 
-  // Sticker seconds, not source: sped up, the same cuts play shorter. WhatsApp's 6s cap
-  // is on the sticker, so up to 6 × speed seconds of source may be kept.
+  // Sticker seconds, not source: sped up, the same cuts play shorter. WhatsApp's cap is
+  // on the sticker, so up to cap × speed seconds of source may be kept.
   const outDur = keptSeconds(spans) / speed
-  const budget = motionBudget(outDur, fps)
+  const tooLong = outDur > MAX_STICKER_SEC + 0.01
   const maxSpan = Math.min(MAX_STICKER_SEC * speed, duration)
 
   const onSpansChange = (next: Span[]): void => {
@@ -529,7 +542,7 @@ export default function Editor({
   const primary = fresh
     ? { label: replaceAt != null ? 'Replace in pack' : 'Add to pack', onClick: addToPack, disabled: !!busy }
     : mode === 'custom'
-      ? { label: busy ? `Generating… ${Math.round(busy.progress * 100)}%` : 'Generate', onClick: () => void generate(), disabled: !!busy || (!isImage && !budget.ok) }
+      ? { label: busy ? `Generating… ${Math.round(busy.progress * 100)}%` : 'Generate', onClick: () => void generate(), disabled: !!busy || (!isImage && tooLong) }
       : { label: busy ? `Encoding… ${Math.round(busy.progress * 100)}%` : 'Add to pack', onClick: addToPack, disabled: true }
 
   const modes: Array<{ m: EditorMode; title: string; sub: string }> = [
@@ -764,7 +777,7 @@ export default function Editor({
                     disabled={!!busy}
                     onClick={() => {
                       setSpeed(v)
-                      // Slowing down lowers the source cap (6 × speed): trim to it.
+                      // Slowing down lowers the source cap (cap × speed): trim to it.
                       setSpans(cur => normalizeSpans(cur, duration, Math.min(MAX_STICKER_SEC * v, duration)))
                     }}
                   >{v}×</button>
@@ -779,15 +792,15 @@ export default function Editor({
 
           {mode === 'custom' && !isImage && !fresh && (
             <div
-              className={`budget est-line ${(!budget.ok || est?.fits === false || est?.quality === 'very soft') ? 'budget-over' : ''}`}
+              className={`budget est-line ${(tooLong || est?.fits === false || est?.quality === 'very soft') ? 'budget-over' : ''}`}
               data-quality={est?.fits ? est.quality : undefined}
             >
-              {!budget.ok
+              {tooLong
                 ? <span>WhatsApp caps stickers at {MAX_STICKER_SEC}s — trim below {MAX_STICKER_SEC}s</span>
                 : est?.fits === false
                 ? (
                   <>
-                    <span>Won’t fit at {fps}fps — about {(est.maxSeconds ?? 0).toFixed(1)}s fits at this framing{pad ? '' : ' (try Fit whole)'}.</span>
+                    <span>Won’t fit even at {est.fps ?? fps}fps — about {(est.maxSeconds ?? 0).toFixed(1)}s fits at this framing{pad ? '' : ' (try Fit whole)'}.</span>
                     <span className="est-actions">
                       {speed < 1.5 && (
                         <button className="btn btn-sm" onClick={() => setSpeed(1.5)}>Try 1.5× speed</button>
@@ -802,7 +815,7 @@ export default function Editor({
                 : est?.fits
                 ? (
                   <span>
-                    estimate <b>≈ {est.projectedKB}KB</b> · {outDur.toFixed(1)}s · {est.effectiveFps}fps
+                    estimate <b>≈ {est.projectedKB}KB</b> · {outDur.toFixed(1)}s · {est.fps ?? fps}fps{est.fps != null && est.fps < fps ? ` (drops from ${fps} to keep detail)` : ''}
                     {' · '}<span className="est-q">{est.quality}</span>
                     {estimating ? ' · updating…' : ''} — Generate to see the real thing
                     {(est.quality === 'soft' || est.quality === 'very soft') && speed < 1.5 && (

@@ -1,10 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
-import { findLoop, frameDiff, scoreLoops, seamVerdict, type LoopBounds } from '../src/loop.ts'
+import { frameDiff, scoreLoops, seamVerdict, type LoopBounds } from '../src/loop.ts'
 
 const frame = (v: number): Uint8Array => new Uint8Array(256).fill(v)
 const one = (b: Partial<LoopBounds>): LoopBounds => ({ sLo: 0, sHi: 0, eLo: 0, eHi: 0, minLen: 0.5, sameCut: true, ...b })
@@ -89,26 +85,4 @@ test('with no frame after the end, a loop is never called seamless on trust', ()
   assert.equal(r.currentVerdict, 'smooth')
   assert.equal(r.end, 1.1)
   assert.equal(r.verdict, 'seamless')
-})
-
-test('findLoop finds the real repeat in a clip that loops every 2 seconds', { skip: spawnSync('ffmpeg', ['-version']).status !== 0 }, async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-loop-test-'))
-  try {
-    const seg = path.join(dir, 'seg.mp4')
-    const clip = path.join(dir, 'clip.mp4')
-    // 2s of moving testsrc, repeated: a loop from 0 ending at 4.0s is perfect.
-    assert.equal(spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=128x128:rate=15:duration=2', '-pix_fmt', 'yuv420p', '-g', '1', seg]).status, 0)
-    assert.equal(spawnSync('ffmpeg', ['-v', 'error', '-stream_loop', '2', '-i', seg, '-c', 'copy', clip]).status, 0)
-    const r = await findLoop({
-      inputPath: clip, fps: 15, preVf: '',
-      bounds: one({ sLo: 0, sHi: 0.5, eLo: 3.0, eHi: 4.5 }),
-      asked: { start: 0, end: 4.5 },
-    })
-    assert.ok(r, 'probe returned a result')
-    assert.ok(Math.abs(r.end - r.start - 4) < 0.07, `expected a 4s loop, got ${r.start}→${r.end}`)
-    assert.equal(r.verdict, 'seamless')
-    assert.ok(r.current != null && r.current > r.cost, 'the asked loop was worse than the found one')
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
 })

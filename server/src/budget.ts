@@ -1,12 +1,16 @@
-export const WEBP_TARGET = 480 * 1024
+/** WhatsApp's StickerPackValidator rejects an animated sticker over 500 × 1024 bytes. */
+export const WEBP_HARD_CAP = 500 * 1024
+/** The encoder measures the real file, so this margin is insurance, not estimate slack. */
+export const WEBP_TARGET = WEBP_HARD_CAP - 4 * 1024
 export const MIN_MOTION_FPS = 24
 export const MAX_STICKER_FPS = 30
-export const MAX_STICKER_SEC = 6
-
-// Conservative mixed-lossy 512²: one keyframe + cheap deltas.
-// Ceiling: busy 3D can overrun; the encoder still fails closed with a trim hint.
-const KEYFRAME_BYTES = 25_000
-const DELTA_BYTES = 3_800
+/** StickerPackValidator: ANIMATED_STICKER_TOTAL_DURATION_MAX = 10s (6s is Sticker.ly's cap). */
+export const MAX_STICKER_SEC = 10
+/**
+ * A projection only stops work when it misses by this much. Sampled projections carry
+ * ~10% error either way; a near miss is cheaper to settle with a real mux than to refuse.
+ */
+export const BAIL_MARGIN = 1.1
 
 export function capFps(sourceFps: number): number {
   const n = Math.round(sourceFps)
@@ -39,58 +43,18 @@ export function fpsSteps(sourceFps: number): number[] {
   return [top, MIN_MOTION_FPS]
 }
 
-export function estimatedBytes(durationSec: number, fps: number): number {
-  const frames = Math.max(1, Math.round(Math.max(0, durationSec) * fps))
-  return KEYFRAME_BYTES + (frames - 1) * DELTA_BYTES
-}
-
-export function maxSecondsForMotion(fps: number): number {
-  const f = Math.max(1, fps)
-  for (let tenths = MAX_STICKER_SEC * 10; tenths >= 3; tenths--) {
-    const s = tenths / 10
-    if (estimatedBytes(s, f) <= WEBP_TARGET) return s
-  }
-  return 0.3
-}
-
-/** Where the trim opens: the whole clip, capped at 6s and at what this fps can fit. */
-export function openingTrimEnd(durationSec: number, sourceFps: number): number {
-  const duration = Math.max(0, durationSec)
-  const keep = maxSecondsForMotion(capFps(sourceFps))
-  return Math.min(duration, MAX_STICKER_SEC, keep)
+/** `minQ` from the request, clamped to what the ladder can honour. */
+export function lowestQuality(minQ?: number): number {
+  return Math.min(70, Math.max(30, minQ ?? 30))
 }
 
 /**
- * A higher fps whose held frames already miss the byte budget is not worth muxing.
- * The last fps still muxes: the estimate is pessimistic for flat animation.
+ * The rungs tried at one fps. While a lower fps remains, quality stays ≥70: 24fps at q70
+ * beats 30fps mush. Only the last fps goes down to the floor.
  */
-export function skipFpsBeforeMux(heldFrames: number, fps: number, isLast: boolean): boolean {
-  if (isLast || heldFrames <= 0 || fps <= 0) return false
-  return estimatedBytes(heldFrames / fps, fps) > WEBP_TARGET
-}
-
-/** Longest opening span: the probed window when its holds fit, otherwise the safe trim. */
-export function fitSpanSeconds(durationSec: number, sourceFps: number, heldFrames: number): number {
-  const fps = capFps(sourceFps)
-  const window = Math.min(Math.max(0, durationSec), MAX_STICKER_SEC)
-  if (heldFrames > 0 && fps > 0 && estimatedBytes(heldFrames / fps, fps) <= WEBP_TARGET) return window
-  return openingTrimEnd(durationSec, sourceFps)
-}
-
-/**
- * One real keyframe plus the per-frame cost of a short mux, scaled to the held
- * frame count. The flat 4KB model is optimistic on detailed footage.
- */
-export function projectAnimatedBytes(
-  keyBytes: number,
-  sampleBytes: number,
-  sampleFrames: number,
-  heldFrames: number,
-): number {
-  const held = Math.max(1, heldFrames)
-  if (sampleFrames <= 1 || keyBytes <= 0) return Math.max(0, Math.round(Math.max(keyBytes, sampleBytes)))
-  const delta = Math.max(0, (sampleBytes - keyBytes) / (sampleFrames - 1))
-  return Math.round(keyBytes + (held - 1) * delta)
+export function qualityLadder(isLast: boolean, lowestQ: number): number[] {
+  const top = [90, 80, 70]
+  return isLast ? [...top, ...[60, 50, 40, 30].filter(q => q >= lowestQ && q < 70)] : top
 }
 
 /** Shrink a span in proportion to how far its projected size misses the cap. */
@@ -100,58 +64,50 @@ export function secondsThatFit(spanSec: number, projectedBytes: number, target =
   return Math.min(MAX_STICKER_SEC, Math.max(0.5, Math.floor(scaled * 10) / 10))
 }
 
-/**
- * One mux is already so far over the cap that even a squared quality drop to the
- * cheapest rung misses. Stops the ladder before q80 and q70 on detailed footage.
- */
-export function firstMuxNeverFits(bytes: number, q: number, lowestQ: number, target: number): boolean {
-  if (bytes <= target || q <= 0) return false
-  if (q <= lowestQ) return true
-  return bytes * (lowestQ / q) ** 2 > target
-}
-
-export function motionBudget(durationSec: number, sourceFps: number): {
-  fps: number
-  ok: boolean
-  tight: boolean
-  maxSeconds: number
-} {
-  const fps = capFps(sourceFps)
-  const maxSeconds = maxSecondsForMotion(fps)
-  return {
-    fps,
-    ok: durationSec <= MAX_STICKER_SEC + 0.01,
-    tight: durationSec > maxSeconds + 0.01,
-    maxSeconds,
-  }
-}
-
 export interface SizeSample {
   q: number
   bytes: number
 }
 
 /**
- * Can the cheapest rung of the ladder possibly fit?
- *
- * Muxing is the expensive part of an encode — eight full passes over 124 frames on a
- * 1 GB VM is minutes — and a clip that comes out at 747KB on q50 was never going to
- * reach 480KB. Two measurements at the same frame count give the quality exponent;
- * the frame ratio then carries the projection to the last rung. The margin keeps it
- * conservative: it only bails when even a generous reading of the curve fails.
+ * Bytes at any quality from two measured points: b(q) = b₂·(q/q₂)^e. Measured exponents
+ * run ~0.5 (flat 30–50) to ~2.7 (steep 80–90), so the clamp only rejects noise.
  */
-export function projectedNeverFits(
-  samples: SizeSample[],
-  frameRatio: number,
+export function qualityCurve(a: SizeSample, b: SizeSample): (q: number) => number {
+  const usable = a.q !== b.q && a.bytes > 0 && b.bytes > 0
+  const raw = usable ? Math.log(a.bytes / b.bytes) / Math.log(a.q / b.q) : 1
+  const e = Math.min(4, Math.max(0.3, Number.isFinite(raw) ? raw : 1))
+  return q => b.bytes * Math.pow(q / b.q, e)
+}
+
+/** Where the ladder lands: the first (fps, q) whose bytes fit, else the last fps at the floor. */
+export interface LadderLanding {
+  fits: boolean
+  fps: number
+  q: number
+  bytes: number
+  /** Bytes at the last fps and the floor quality — what any shorter trim is scaled from. */
+  floorBytes: number
+}
+
+/**
+ * The encoder's whole ladder, run on a size model instead of muxes. The estimate shows
+ * this landing and the encoder uses it to skip rungs, so the two cannot disagree on
+ * which fps and quality a clip ends at.
+ */
+export function planLadder(
+  steps: number[],
   lowestQ: number,
-  target: number,
-): boolean {
-  if (samples.length < 2) return false
-  const [a, b] = [samples[samples.length - 2], samples[samples.length - 1]]
-  if (a.q <= b.q || a.bytes <= 0 || b.bytes <= 0) return false
-  const exponent = Math.log(a.bytes / b.bytes) / Math.log(a.q / b.q)
-  // Clamp: below 1 the curve is implausibly flat, above 4 it is noise-driven.
-  const e = Math.min(4, Math.max(1, exponent))
-  const projected = b.bytes * Math.pow(lowestQ / b.q, e) * Math.max(0, frameRatio)
-  return projected > target
+  bytesAt: (fps: number, q: number) => number,
+  target = WEBP_TARGET,
+): LadderLanding {
+  const last = steps[steps.length - 1]
+  const floorBytes = bytesAt(last, lowestQ)
+  for (const [i, fps] of steps.entries()) {
+    for (const q of qualityLadder(i === steps.length - 1, lowestQ)) {
+      const bytes = bytesAt(fps, q)
+      if (bytes <= target) return { fits: true, fps, q, bytes, floorBytes }
+    }
+  }
+  return { fits: false, fps: last, q: lowestQ, bytes: floorBytes, floorBytes }
 }

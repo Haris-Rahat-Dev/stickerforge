@@ -1,7 +1,9 @@
+import { MAX_STICKER_SEC } from './budget.js'
+
 export interface Span { start: number; end: number }
 
 const MIN_SPAN = 0.3
-const MAX_KEPT = 6
+const MAX_KEPT = MAX_STICKER_SEC
 
 export function keptSeconds(spans: Span[]): number {
   return spans.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0)
@@ -12,8 +14,8 @@ export function spansFromTrim(start: number, end: number): Span[] {
 }
 
 /**
- * Clamp, sort, merge, and cap the kept total at `maxKept` source seconds — 6 at 1×, but
- * 6 × speed when sped up, since WhatsApp's cap is on the sticker, not the source.
+ * Clamp, sort, merge, and cap the kept total at `maxKept` source seconds — the sticker
+ * cap at 1×, but cap × speed when sped up, since WhatsApp's cap is on the sticker.
  */
 export function normalizeSpans(spans: Span[], duration: number, maxKept = MAX_KEPT): Span[] {
   const cleaned = spans
@@ -51,13 +53,4 @@ export function splitAt(spans: Span[], t: number, gap = 0.06): Span[] {
     }
     return [s]
   })
-}
-
-export function concatPrefix(spans: Span[]): string | null {
-  if (spans.length < 2) return null
-  const parts = spans.map((s, i) =>
-    `[0:v]trim=start=${s.start}:end=${s.end},setpts=PTS-STARTPTS[v${i}]`,
-  )
-  const inputs = spans.map((_, i) => `[v${i}]`).join('')
-  return `${parts.join(';')};${inputs}concat=n=${spans.length}:v=1:a=0,`
 }

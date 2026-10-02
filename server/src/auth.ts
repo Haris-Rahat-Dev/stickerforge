@@ -29,8 +29,16 @@ export function createVerifier(
   }
 }
 
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1'])
+
 export function resolveAuthMode(): AuthMode {
-  if (process.env.FIREBASE_E2E_BYPASS === '1') return 'e2e'
+  if (process.env.FIREBASE_E2E_BYPASS === '1') {
+    // The bypass lets any caller claim any uid. It must never answer beyond this machine.
+    if (!LOOPBACK.has(process.env.HOST || '127.0.0.1')) {
+      throw new Error('FIREBASE_E2E_BYPASS=1 is only allowed with a loopback HOST')
+    }
+    return 'e2e'
+  }
   const saPath = process.env.FIREBASE_SERVICE_ACCOUNT
   if (saPath && fs.existsSync(saPath)) return 'firebase'
   return 'cookie'

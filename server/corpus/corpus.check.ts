@@ -7,7 +7,9 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { convertToAnimatedWebp, imageToAnimatedWebp } from '../src/webp.ts'
 import { probeMedia, assessQuality } from '../src/probe.ts'
+import { MAX_STICKER_SEC } from '../src/budget.ts'
 import type { CropRect } from '../src/types.ts'
+import type { Span } from '../src/spans.ts'
 
 const run = promisify(execFile)
 const HARD_CAP = 500 * 1024
@@ -25,6 +27,7 @@ interface Fixture {
   fps: number
   crop?: CropRect | null
   border?: boolean
+  spans?: Span[]
   /** Anything the measured spec must additionally satisfy. */
   expect?: { minFrames?: number; maxFrames?: number }
 }
@@ -72,12 +75,20 @@ const fixtures: Fixture[] = [
     start: 0, end: 1, fps: 24,
   },
   {
-    // WhatsApp's 6s ceiling, exercised cheaply: a held scene over the full span is
-    // what makes a long cut fit at all. An all-motion 6s clip is the case the budget
+    // Two cuts through the seek-then-concat path: 1.6s kept out of a 3s source.
+    name: 'two-cuts',
+    build: () => lavfi('two-cuts', 'testsrc2=size=512x512:rate=30:duration=3'),
+    start: 0.4, end: 2.8, fps: 30,
+    spans: [{ start: 0.4, end: 1.2 }, { start: 2, end: 2.8 }],
+    expect: { minFrames: 40 },
+  },
+  {
+    // WhatsApp's 10s ceiling, exercised cheaply: a held scene over the full span is
+    // what makes a long cut fit at all. An all-motion 10s clip is the case the budget
     // exists to reject, and budget.test.ts covers that arithmetic.
-    name: 'full-six-seconds',
-    build: () => lavfi('full-six', 'color=c=0x203040:s=512x512:d=6:r=30'),
-    start: 0, end: 6, fps: 30,
+    name: 'full-ten-seconds',
+    build: () => lavfi('full-ten', `color=c=0x203040:s=512x512:d=${MAX_STICKER_SEC}:r=30`),
+    start: 0, end: MAX_STICKER_SEC, fps: 30,
     expect: { maxFrames: 4 },
   },
 ]
@@ -95,19 +106,19 @@ for (const f of fixtures) {
       inputPath: src, outPath: out,
       start: f.start, end: f.end, speed: 1, fps: f.fps,
       fit: 'cover', padColor: '#000000', crop: f.crop ?? null, cropPos: 0.5,
-      border: f.border ?? false,
+      border: f.border ?? false, spans: f.spans,
     })
 
     assert.equal(r.width, 512, 'canvas width must be 512')
     assert.equal(r.height, 512, 'canvas height must be 512')
     assert.ok(r.frames >= 2, `${r.frames} frames is a static image, which WhatsApp rejects`)
     assert.ok(r.fps <= 30, `${r.fps}fps exceeds WhatsApp's cap`)
-    assert.ok(r.duration <= 6.05, `${r.duration}s exceeds WhatsApp's cap`)
+    assert.ok(r.duration <= MAX_STICKER_SEC + 0.05, `${r.duration}s exceeds WhatsApp's cap`)
     assert.ok(r.sizeBytes <= HARD_CAP, `${Math.round(r.sizeBytes / 1024)}KB exceeds WhatsApp's cap`)
     assert.ok(r.ssim !== null && r.ssim >= SSIM_FLOOR, `luma SSIM ${r.ssim} is below the ${SSIM_FLOOR} floor`)
     // Frame durations are whole milliseconds, so 180 frames at 30fps mux to 5.94s —
     // allow one frame period rather than pretending the arithmetic is exact.
-    const requested = f.end - f.start
+    const requested = f.spans ? f.spans.reduce((t, s) => t + s.end - s.start, 0) : f.end - f.start
     const slop = 1 / f.fps + 0.05
     assert.ok(Math.abs(r.duration - requested) <= slop,
       `output ran ${r.duration}s for a ${requested}s trim at ${f.fps}fps`)

@@ -1,4 +1,4 @@
-import type { BatchJobInfo, ConvertRequest, CropRect, EstimateResult, FileRecord, Job, StickerSpec, StickerView } from './types.js'
+import type { ConvertRequest, CropRect, EstimateResult, FileRecord, Job, StickerSpec, StickerView } from './types.js'
 import { authHeader, tokenQuery, freshTokenQuery } from './auth.js'
 import type { Span } from './spans.js'
 
@@ -56,13 +56,6 @@ export async function filmstripUrl(id: string): Promise<string | null> {
     const blob = await res.blob()
     return URL.createObjectURL(blob)
   } catch { return null }
-}
-
-export async function fitSpan(id: string): Promise<number | null> {
-  const res = await apiFetch(`${BASE}/api/fit-span/${id}`)
-  if (!res.ok) return null
-  const json = await res.json() as { seconds?: number }
-  return typeof json.seconds === 'number' ? json.seconds : null
 }
 
 export async function detectCrop(id: string): Promise<CropRect | null> {
@@ -129,19 +122,6 @@ export async function planSeams(settings: ConvertRequest, only?: number, signal?
   })
   if (!res.ok) throw new Error('Seam analysis failed')
   return res.json() as Promise<SeamPlan>
-}
-
-export async function quickConvert(fileId: string): Promise<string> {
-  const res = await apiFetch(`${BASE}/api/batch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileIds: [fileId] })
-  })
-  const json = await res.json()
-  if (!res.ok) throw new Error(json.error || 'Convert failed')
-  const info = json[0] as BatchJobInfo | undefined
-  if (!info) throw new Error('Convert failed — no job created')
-  return info.jobId
 }
 
 export interface PackManifest {
@@ -250,23 +230,6 @@ export async function cancelJob(jobId: string): Promise<void> {
 
 export function webpPreviewUrl(jobId: string): string {
   return `${BASE}/api/output/webp/${jobId}${tokenQuery()}`
-}
-
-export function downloadWebm(jobId: string, name: string): void {
-  void freshTokenQuery().then(q => triggerDownload(`${BASE}/api/download/webm/${jobId}${q}`, `${name}.webm`))
-}
-
-export function downloadTray(jobId: string, name: string): void {
-  void freshTokenQuery().then(q => triggerDownload(`${BASE}/api/download/tray/${jobId}${q}`, `${name}.png`))
-}
-
-function triggerDownload(url: string, filename: string): void {
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
 }
 
 export interface JobEvent {

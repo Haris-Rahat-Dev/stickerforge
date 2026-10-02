@@ -47,6 +47,17 @@ test('resolveAuthMode: e2e bypass wins', () => {
   else process.env.FIREBASE_E2E_BYPASS = prev
 })
 
+test('resolveAuthMode: e2e bypass refuses a public bind', () => {
+  const prev = { b: process.env.FIREBASE_E2E_BYPASS, h: process.env.HOST }
+  process.env.FIREBASE_E2E_BYPASS = '1'
+  process.env.HOST = '0.0.0.0'
+  assert.throws(() => resolveAuthMode(), /loopback/)
+  for (const [k, v] of [['FIREBASE_E2E_BYPASS', prev.b], ['HOST', prev.h]] as const) {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+})
+
 test('resolveAuthMode: cookie when service account unset', () => {
   const prevB = process.env.FIREBASE_E2E_BYPASS
   const prevS = process.env.FIREBASE_SERVICE_ACCOUNT

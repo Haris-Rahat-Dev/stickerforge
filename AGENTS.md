@@ -8,9 +8,9 @@ A Node API + React editor, plus a thin Android app that can push a pack into Wha
 
 ## WhatsApp spec (non-negotiable)
 
-- **Sticker.ly / chat import:** WebM VP9, 512×512, ≤30fps, ≤6s, **<500KB**, silent
-- **Third-party provider API** (`github.com/whatsapp/stickers`): **animated WebP**, same size/duration/fps caps — not WebM. Sticker.ly silently re-encodes WebMs; the Android app cannot.
-- Pack minimum: **3 stickers**. Tray PNG required (96×96-ish static icon).
+- **Third-party provider API** (`github.com/whatsapp/stickers`, enforced by its `StickerPackValidator`): **animated WebP**, 512×512, **≤10s**, frame duration ≥8ms (we cap 30fps), **≤500×1024 bytes**, silent. This is the only output — the WebM/Sticker.ly path is gone.
+- Tray 24–512px, ≤50KB. 1–3 emojis per sticker, 3–30 stickers per pack.
+- Tray PNG is required; we extract a representative 96×96 frame (`thumbnail` filter) from the sticker's own trim/crop.
 - No website can write into WhatsApp. Only an installed app exposing `StickerContentProvider`, then user taps “Add to WhatsApp”. App must be **whitelisted** by WhatsApp (days–weeks).
 
 ## Commands
@@ -21,7 +21,7 @@ npm run dev          # API :3210 + Vite :5173 (proxy /api → 3210)
 npm run build && npm start   # one process, UI+API on :3210
 npm run typecheck
 npm test             # node:test unit tests (auth, model, flow, reap, probe, …)
-npm run test:corpus  # ~4 min: synthesises 7 clips, encodes them, asserts measured spec
+npm run test:corpus  # ~30s: synthesises 8 clips, encodes them, asserts measured spec
 npm run test:e2e     # assertions; needs SAMPLE_A/B in ~/Downloads (see scripts/e2e.sh)
 ```
 
@@ -63,8 +63,8 @@ server/src/
   queue.ts           in-process concurrency limiter (caps parallel encodes)
   reap.ts            boot-time sweep of media no record can reach (orphans, .next)
   probe.ts           ffprobe + quality score + cropdetect
-  convert.ts         two-pass VP9 WebM, <500KB with bitrate retry
-  budget.ts          WhatsApp WebP fps ladder + motion-budget (24fps floor)
+  convert.ts         shared crop/fit/border filter chain + tray frame extraction
+  budget.ts          caps, fps/quality ladder, two-point size curve (planLadder)
   webp.ts            ffmpeg frames → img2webp mixed/delta animated WebP
   jobfeed.ts         in-process job event bus (SSE fan-out)
   sticker.ts         derived editability, StickerView, emoji normalization
@@ -88,7 +88,7 @@ App state is one reducer with three routes (`web/src/flow.ts`): `packs`, `pack`,
 
 Preview **must** match the encode: square crop on the stage, trim loop, white inset. If preview and ffmpeg diverge, that’s a bug.
 
-**Modes.** The editor opens in **Short** (source fps, as long as fits) with **Long** (15fps, up to 6s; hidden when the source is ≤15fps) and **Custom** (the full timeline/crop/fps editor) beside it. Presets encode the real WebP as soon as they're picked and whenever their fixed-length window is released (`lockLength` on `Timeline`); on a byte-budget failure they refit via `nextFitLength()` in `web/src/budget.ts` — the encoder's `fitSeconds` comes from a q50 sample and undershoots, so it bisects before taking the safe figure. Custom previews only after **Generate**. Switching to Custom starts from exactly the preset's settings, so its result stays addable until something changes.
+**Modes.** The editor opens in **Short** (source fps, as long as fits) with **Long** (15fps, up to 10s; hidden when the source is ≤15fps) and **Custom** (the full timeline/crop/fps editor) beside it. Presets size their window with `POST /api/estimate` first (`fitPresetLength` in `Editor.tsx`), then encode the real WebP once — as soon as they're picked and whenever their fixed-length window is released (`lockLength` on `Timeline`). A byte-budget failure still refits via `nextFitLength()` (takes the encoder's `fitSeconds`), but should be rare: a noisy 720p clip sized by the estimate fit first try at 473KB. Custom previews only after **Generate**. Switching to Custom starts from exactly the preset's settings, so its result stays addable until something changes.
 
 **Review before commit.** Editor encodes are `draft: true` jobs: hidden from `GET /api/stickers`, discarded by `DELETE /api/job/:id` (keeps the source) when replaced, stopped, or the editor closes, and turned into real stickers by `PUT /api/packs/:code/stickers`. Boot discards drafts older than 24h that no pack holds. Cancel/discard now kills ffmpeg: `startJob` runs the task under `encodeSignal` (AsyncLocalStorage in `webp.ts`), which every spawn picks up — otherwise abandoned preset encodes held the two encode slots.
 
@@ -96,16 +96,16 @@ Preview **must** match the encode: square crop on the stage, trim loop, white in
 
 **Layout.** Preview on top, the timeline full-width under it, config (modes, measured spec, fps, estimate) below — the timeline needs the width.
 
-**Smooth seams** (`∞` in the transport, `POST /api/seams`, `server/src/seams.ts` + scoring in `loop.ts`). Every join is a seam: each cut between pieces, plus the loop from the last piece back to the first. Each piece end belongs to exactly one seam, so they're scored in order on one cached whole-clip pass of 16×16 gray fingerprints taken *with the sticker's crop/fit* (~0.1–0.3s even for 65s). A seam's cost is how far the next piece's first frame is from the frame that *would have come next* — that, not the last shown frame, separates a forward continuation from a one-frame twitch. Verdicts (seamless/smooth/noticeable/jump/hard) are relative to one normal *moving* step measured over the **whole clip** — measuring it per window or over the kept pieces made the yardstick move with the cut, so pressing again kept "improving" things; one press must be idempotent (tested). It picks the best level, then the longest loop / the smallest cut move among near-best costs, and changes nothing unless the level improves. **Loop seams only trim; cuts may move ±1.5s and grow the sticker** (up to 6s, reported as "+Ns longer — check the size estimate"). A *hard cut* is one isolated spike (both neighbouring steps small) — sustained motion (zooms, a leg sweeping past, fades) is not; a seam across a hard cut is a "shot change" and left alone. Pieces running into (or starting on) blank frames get a warning with an "End at…" fix. Live markers on the timeline show each seam; click one to snap just it. Presets hand over to Custom.
+**Smooth seams** (`∞` in the transport, `POST /api/seams`, `server/src/seams.ts` + scoring in `loop.ts`). Every join is a seam: each cut between pieces, plus the loop from the last piece back to the first. Each piece end belongs to exactly one seam, so they're scored in order on one cached whole-clip pass of 16×16 gray fingerprints taken *with the sticker's crop/fit* (~0.1–0.3s even for 65s). A seam's cost is how far the next piece's first frame is from the frame that *would have come next* — that, not the last shown frame, separates a forward continuation from a one-frame twitch. Verdicts (seamless/smooth/noticeable/jump/hard) are relative to one normal *moving* step measured over the **whole clip** — measuring it per window or over the kept pieces made the yardstick move with the cut, so pressing again kept "improving" things; one press must be idempotent (tested). It picks the best level, then the longest loop / the smallest cut move among near-best costs, and changes nothing unless the level improves. **Loop seams only trim; cuts may move ±1.5s and grow the sticker** (up to the 10s cap, reported as "+Ns longer — check the size estimate"). A *hard cut* is one isolated spike (both neighbouring steps small) — sustained motion (zooms, a leg sweeping past, fades) is not; a seam across a hard cut is a "shot change" and left alone. Pieces running into (or starting on) blank frames get a warning with an "End at…" fix. Live markers on the timeline show each seam; click one to snap just it. Presets hand over to Custom.
 
 - **Crop** is a square box on the full frame (drag / corner-resize). Default is the largest centered square (same as cover-center).
 - **Fit whole** — contain + letterbox so portrait/landscape memes keep the entire frame.
 - **White border** — opt-in 460px content + 26px white pad. Stops WhatsApp rounded-corners / built-in maker from clipping edge text. Off by default.
 - **FPS:** source, cap 30. Do **not** upsample GIF-sourced 10–17fps. WhatsApp WebP uses `img2webp` mixed/delta encoding: quality first (q≥70), then 24fps floor. Consecutive identical frames are held as one long frame. The 24 floor is the encoder's automatic ladder only: the editor's **Frame rate** control (`fpsChoices()` in `web/src/budget.ts`) lets the user pick source/24/20/15 — never above source — trading smoothness for seconds or sharpness. Busy 30fps footage fits ~2.5–4.5s at 24; 15fps buys roughly 60–90% more (measured: smol_silly_cat 2.5s→4.8s).
-- **Speed** (Custom: 1×–8×; server clamps 0.25–8). The 6s cap is on the *sticker*, so up to 6 × speed seconds of source may be kept (`normalizeSpans(…, maxKept)`, `maxSrcSpanForSpeed`); `outDur = kept / speed` everywhere a length is judged (budget, estimate, concat encodes). The preview plays at `playbackRate = speed`. Measured on a busy clip: 4s of source at 2× fits at q70 (worst frame 0.987) where the same 4s at 1× needs q30 — speed is a real quality lever, not just a meme effect.
+- **Speed** (Custom: 1×–8×; server clamps 0.25–8). The 10s cap is on the *sticker*, so up to 10 × speed seconds of source may be kept (`normalizeSpans(…, maxKept)`, `maxSrcSpanForSpeed`); `outDur = kept / speed` everywhere a length is judged (budget, estimate, concat encodes). The preview plays at `playbackRate = speed`. Measured on a busy clip: 4s of source at 2× fits at q70 (worst frame 0.987) where the same 4s at 1× needs q30 — speed is a real quality lever, not just a meme effect.
 - **Quality floor.** `minQ` in `ConvertSettings` (unset = 30). Presets send 50 and refit shorter instead: q30 turns smooth skin into visible 8px blocks (ray clip, Short went 4.3s blocky → 3.3s clean). Luma SSIM badly under-reports this blockiness (0.965 on a visibly blocky face) — look at a zoomed crop before trusting a score. `settingsKey` ignores `minQ` so Custom still recognises a preset's result.
-- **Budget:** Add allows up to 6s. All-motion estimate (~4s at 30fps) is a warning with a safer-trim button; holds can still make a longer cut fit. Encoder fails closed if it will not.
-- Bitrate: `computeBitrateKbps` targets ~470KB for the WebM; WebP is encoded from the **original** at Add (cached) so pack build is a copy.
+- **Budget:** one size model everywhere. `planLadder()` walks the encoder's real ladder (q90/80/70 at the higher fps, then down to `minQ` at 24) over a two-point curve `bytes(q) = b·(q/q₀)^e` fitted from a 1.5s sample at two qualities. The estimate uses it to report the *landed* fps/q (the Custom line says when it drops from the chosen fps); the encoder uses it to skip a tier that can't fit and to start one rung above the projected landing (`ponytail:` there). `WebpBudgetError.maxSeconds` scales from the floor rung's bytes — not the q70 attempt, which undershot. Target is `WEBP_TARGET` (500KB − 4KB); estimates aim 6% under it.
+- WebP is encoded from the **original** at Add (cached) so pack build is a copy.
 - Staging shelf rehydrates from `GET /api/files` when a pack opens — reload does not drop uncommitted uploads.
 - Quality bpp warn is 0.02; flat 3D animation (JoeVerse) false-alarms — expected.
 
@@ -114,7 +114,7 @@ Good meme defaults: square crop, black-border auto available, 2–4s (budget-cap
 ## Product decisions (don’t reopen)
 
 - Local web + system ffmpeg. Not Tauri/Electron, not a hosted converter (367MB sources, no upload tax).
-- Keep conversion on the server. Phones are slow at two-pass VP9.
+- Keep conversion on the server. Phones are slow at frame extraction + img2webp.
 - Android is native Java from WhatsApp’s sample contract — not RN/Capacitor. Provider authority must start with the package name: `com.stickerforge.app.stickercontentprovider`.
 - iOS: no public provider API. Web download + Sticker.ly is the interim.
 - No packs-as-product/feed/remix until a pack has landed in WhatsApp from **our** app.
@@ -123,7 +123,7 @@ Good meme defaults: square crop, black-border auto available, 2–4s (budget-cap
 ## Model: Source / Sticker / Pack
 
 - **Source** — the uploaded video or image. Transient. Lives in the staging shelf while iterating. Deleted when a pack containing its sticker is built successfully.
-- **Sticker** — the encoded artefact (`job` + WebM + tray PNG + webp-cache entry). Durable, owned by user, reusable in any number of packs, searchable.
+- **Sticker** — the encoded artefact (`job` + webp-cache WebP + tray PNG). Durable, owned by user, reusable in any number of packs, searchable.
 - **Pack** — an ordered `pack_stickers` membership, buildable and shippable to WhatsApp.
 
 Three rules the code depends on:
@@ -161,17 +161,23 @@ This is what caught the single-frame defect below, and it is cheap (two 512² ff
 - **Measuring a sticker against its source:** never resample the decoded WebP with `fps=N`. Frame durations are stored as whole ms (24fps → 42ms, not 41.67), so the timelines drift a full frame apart after ~60 frames and fast motion then scores like a disaster (it made q50/2× look blocky at SSIM 0.79 when they were 0.98). Decode with `-fps_mode passthrough` and compare index-to-index against the frames that were muxed.
 - **Ghosting is keyframe spacing, not a decode bug.** Lossy delta frames reuse the previous frame wherever a pixel moved less than a q-dependent threshold, so error accumulates until the next keyframe (Cat: SSIM slid 0.97→0.93 over 18 frames, then snapped back). `IMG2WEBP_HEAD` uses `-kmin 2 -kmax 6`: worst-frame 0.941→0.953 for +2KB on busy clips, ~10% more bytes on static ones (kmax 3 cost static clips ~37%). The spec's `ssim` measures frame 1 — always a keyframe — so it cannot see this; don't read a good Detail figure as "no ghosting".
 - The VM runs Ubuntu 22.04's ffmpeg 4.4 and libwebp 1.2.2: ffmpeg cannot decode animated WebP there, so `frameSsim()` falls back to `webpmux -get frame 1` + `dwebp`. `-sharp_yuv` is skipped on that img2webp.
-- **Never encode the pack WebP from the WebM.** That second lossy generation was the pixelation. Convert writes `data/webp-cache/<jobId>.webp` at Add (from the original, `job.settings` applied once), and `assemblePack` copies that. On a cache miss it **re-encodes from the original source** with `...job.settings` — correct there, and only there. If the source is gone too it fails closed and names the sticker; do not "fix" that by falling back to the WebM.
+- **Never encode the pack WebP from another lossy output.** A second lossy generation (the old WebM) was the pixelation. Convert writes `data/webp-cache/<jobId>.webp` at Add (from the original, `job.settings` applied once), and `assemblePack` copies that. On a cache miss it **re-encodes from the original source** with `...job.settings` — correct there, and only there. If the source is gone too it fails closed and names the sticker; do not "fix" that by falling back to anything lossy.
 - **`probeVideo` returns display dimensions, not coded ones.** ffprobe's `width/height` are coded; ffmpeg auto-applies the display matrix on decode. A portrait phone clip is coded 1920×1080 with `rotation: -90` and decodes as 1080×1920 — cropping against the coded numbers puts the box on the wrong axis. `displaySize()` swaps for ±90/270. Everything downstream (`squareCrop`, `sanitizeCrop`, the crop-box overlay, `cropdetect`) assumes display space.
 - **A motionless trim must still be an animation.** `collapseHolds` can reduce a still clip to one held frame; feeding `img2webp` that frame twice yields a **static** WebP (it dedupes them), which WhatsApp refuses inside an animated pack. `muxImg2Webp` special-cases `frames.length === 1` to `cwebp` + two `webpmux -frame` entries. The `spec.frames >= 2` assertion in `webp.test.ts` guards it.
-- `-t` in `webp.ts`/`convert.ts` is a **source** span while `setpts=PTS/speed` compresses the timeline afterwards. `planSpan()` in `budget.ts` returns `srcSpan` (for `-t`) and `outDur` (for everything else) — never pass one where the other belongs. `parseSettings` clamps the trim so `outDur` can't exceed 6s at any speed.
+- `-t` in `webp.ts` is a **source** span while `setpts=PTS/speed` compresses the timeline afterwards. `planSpan()` in `budget.ts` returns `srcSpan` (for `-t`) and `outDur` (for everything else) — never pass one where the other belongs. `parseSettings` clamps the trim so `outDur` can't exceed 10s at any speed.
+- **Filter order is `setpts=PTS/speed,fps=N` before crop/scale** (`stickerChain()`): identical frames, ~3× cheaper at 8× since dropped frames are never scaled. Multi-cut encodes seek with input `-ss` to the first cut and trim relative to it (`concatPrefix(spans, offset)`) — frame-identical (framemd5) without decoding the whole lead-in.
+- **Frame timing is exact:** each frame's duration is `edge(i+1) − edge(i)` with `edge(i) = round(i·1000/fps)`, so 24fps × 6s muxes to 6000ms, not 5.94s.
+- **Seam fingerprints sample at `fps / speed`** (`seamFps()`): the pass runs before `setpts`, so sampling at the output fps made a 2× sticker compare frames two output-steps apart.
 - **Hold detection thresholds are measured, not guessed.** At 16×16 gray a re-encoded photographic still peaks at 0–1 per pixel; a ticking counter peaks at 6, a mandelbrot zoom at 4–6, handheld phone footage at 28–55. `HOLD_MEAN_MAX = 0.5` / `HOLD_PEAK_MAX = 2` sit in that gap. Loosening them silently throws away motion — that is what a perceptual hash did here.
-- An all-motion 6s clip is not a corpus fixture: it took 23 minutes to encode. The corpus uses a 6s *held* scene to prove duration legality and leaves the busy-6s rejection to `budget.test.ts`.
+- An all-motion 10s clip is not a corpus fixture. The corpus uses a 10s *held* scene to prove duration legality and leaves the busy-clip rejection to `budget.test.ts`.
 - `verify()` must be `return await` inside the `try`: a bare `return verify(...)` runs the `finally` temp cleanup while the measurement is still writing into it, which intermittently throws `ENOTEMPTY` and yields `ssim: null`.
 - `npm test` lists test files explicitly by glob. A `server/test/index.js` barrel used to import a hardcoded list, so new `*.test.ts` files were silently skipped (15 tests were not running).
+- **Limits that protect a 1GB VM:** uploads ≤1GB each, ≤3GB staged per user (413); ffprobe only accepts local files in the `DEMUXERS` allowlist (`probe.ts` — an HLS playlist could otherwise make ffmpeg fetch URLs); every spawn has a timeout + SIGKILL; filmstrip/cropdetect/estimate/seams share a 2-slot `probeQueue`; drafts are swept hourly and `sf-webp-*`/`sf-loop-*` temp dirs at boot. `FIREBASE_E2E_BYPASS=1` refuses to start on a non-loopback `HOST`.
+- **The server exits on `uncaughtException`** (state may be corrupt). The systemd unit / Docker run needs `Restart=on-failure` / `--restart unless-stopped`.
+- **Android keeps one folder per pack** (`filesDir/stickers/<identifier>/`, identifier = `stickerforge-<code>`). The provider lists every folder whose `manifest.json` names it, and resolves stickers/assets by identifier, so loading pack B never touches pack A in WhatsApp. Pre-change flat files in `filesDir/stickers/` are ignored.
+- Removed routes: `/api/fit-span`, `/api/batch`, `/api/download/webm`, `/api/download/tray`. The sticker WebP is `GET /api/output/webp/:jobId`.
 - `adb push` files are invisible to Sticker.ly until a media scan (`adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE`).
 - WhatsApp’s built-in sticker maker re-crops; edge text dies without the white-border toggle.
-- Duplicate identical WebMs can be rejected by importer apps.
 
 ## Next (only if asked)
 
@@ -192,12 +198,12 @@ This is what caught the single-frame defect below, and it is cheap (two 512² ff
 - For the Ampere Cursor Automation, put OCI credentials as Runtime Secrets on the selected Cloud Environment (not Build Secrets); redacted values still mean present.
 - Never search/enumerate credential files on disk (`find`/`mdfind`/broad `ls` for `*.pem`, keys, `.env`, etc.); ask for an exact path or have the user paste — EDR treats that hunt as sensitive-data enumeration.
 - Prefer maximizing kept frames/duration/fps within WhatsApp caps; contain/letterbox non-square sources rather than crop-away; when a cut is required, use the trim timeline as the primary fine-tune (framing/speed/fps secondary, preview-matched).
+- Encodes must fail fast: detect a budget overrun (and suggest the fitting trim) before long muxes, never after making the user wait out a doomed encode.
 
 ## Learned Workspace Facts
 
 - Hosted StickerForge needs a long-running VM with ffmpeg/cwebp/webpmux; SQLite + local disk is enough for v1.
-- OCI home region for this project is `ap-mumbai-1`; Always Free Ampere A1 Flex is often out of capacity there.
-- When A1 is unavailable, Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg; keep encode concurrency low on this shape).
+- OCI home region is `ap-mumbai-1`; Always Free Ampere A1 Flex is often out of capacity there, so Always Free `VM.Standard.E2.1.Micro` is the interim shape (~1 GB RAM; needs swap for npm/ffmpeg; keep encode concurrency low).
 - Ampere capacity retries are intended as a Cursor Automation named “Hold Always Free Ampere A1” (procure-and-hold, ~every 5 minutes), not a checked-in local loop.
 - Hosted app HTTP is Tailscale-only (VM iptables allows `:3210` on `tailscale0`; public `:3210` closed); laptop and phone need Tailscale on the same account. VM tailnet hostname is `stickerforge`.
 - VM SSH uses the launch `authorized_keys` pubkey (not an OCI console `.pem`); Tailscale SSH is not enabled — `ssh ubuntu@<tailscale-ip>` still authenticates with that key over the private path.
@@ -205,5 +211,4 @@ This is what caught the single-frame defect below, and it is cheap (two 512² ff
 - After a successful build, “Show install” reopens the install drawer without rebuilding (loads the cached pack via `GET /api/pack/:code`).
 - Hosted backups: `backup.sh` on the VM (SQLite snapshot → tar `data/` → OCI Object Storage → prune to 7); bucket `stickerforge-backups` in `ap-mumbai-1` via instance principal; `.backup.env` is gitignored and holds the Object Storage namespace on the VM; nightly cron runs on the VM (see `docs/backups.md`).
 - OCI MCP “connected” only means the server process started; Object Storage/IAM calls still need a valid `OCI_CONFIG_PROFILE` with working API signing.
-- Auth: `firebase-admin` when `FIREBASE_SERVICE_ACCOUNT` is set; otherwise anonymous `sf_uid` cookies and no sign-in UI so dogfood/deploy works without a Firebase project.
 - Older Homebrew `img2webp` may reject `-sharp_yuv` (“Unknown option”); WebP mux retries skipping unknown flags — do not assume libwebp feature parity across Mac and the VM.

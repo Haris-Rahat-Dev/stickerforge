@@ -1,14 +1,7 @@
-import path from 'node:path'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import os from 'node:os'
-import { spawn } from 'node:child_process'
+// How visible a join is: the frame a piece resumes on against the frame that would have
+// come next. Frames are compared as the same 16×16 gray fingerprints hold detection
+// uses, taken *after* the sticker's own crop/fit so only shipped pixels count.
 
-// Where to start and end a loop so the jump back to the start is no bigger than an
-// ordinary frame step. Frames are compared as the same 16×16 gray fingerprints hold
-// detection uses, taken *after* the sticker's own crop/fit so only shipped pixels count.
-// The search only ever shrinks the cut, so it can never push a sticker over budget.
-
-const SIDE = 16
 /** Same stillness cut as hold detection (HOLD_MEAN_MAX in webp.ts). */
 const HOLD_MEAN = 0.5
 const RANK: Record<SeamVerdict, number> = { seamless: 0, smooth: 1, noticeable: 2, jump: 3, hard: 4 }
@@ -199,63 +192,5 @@ export function scoreLoops(
     verdict: seamVerdict(best.cost, typical),
     currentVerdict: current == null ? null : seamVerdict(current, typical),
     curve,
-  }
-}
-
-function grab(inputPath: string, from: number, span: number, fps: number, preVf: string, out: string, signal?: AbortSignal): Promise<void> {
-  const chain = [preVf, `fps=${fps}`, `scale=${SIDE}:${SIDE}:flags=area,format=gray`].filter(Boolean).join(',')
-  return new Promise((resolve, reject) => {
-    const p = spawn('ffmpeg', [
-      '-v', 'error', '-ss', String(Math.max(0, from)), '-t', String(Math.max(dtFloor(fps), span)),
-      '-i', inputPath, '-vf', chain, '-f', 'rawvideo', '-y', out,
-    ], signal ? { signal } : {})
-    let err = ''
-    p.stderr.on('data', d => { err += d })
-    p.on('close', c => (c === 0 ? resolve() : reject(new Error(`loop probe failed: ${err.slice(-200)}`))))
-    p.on('error', reject)
-  })
-}
-
-const dtFloor = (fps: number): number => 1 / Math.max(1, fps)
-
-async function sigs(file: string): Promise<Uint8Array[]> {
-  const buf = await readFile(file)
-  const stride = SIDE * SIDE
-  const out: Uint8Array[] = []
-  for (let off = 0; off + stride <= buf.length; off += stride) out.push(buf.subarray(off, off + stride))
-  return out
-}
-
-/**
- * Probe the source and find the smoothest loop that only shrinks the current one:
- * start in [start, start+search], end in [end−search, end]. `preVf` is the sticker's
- * crop/fit chain so only shipped pixels are compared.
- */
-export async function findLoop(opts: {
-  inputPath: string
-  bounds: LoopBounds
-  asked: { start: number; end: number } | null
-  fps: number
-  preVf: string
-  signal?: AbortSignal
-}): Promise<LoopResult | null> {
-  const { inputPath, bounds: b, asked, fps, preVf, signal } = opts
-  if (!(b.sHi >= b.sLo) || !(b.eHi > b.eLo) || fps <= 0) return null
-  const dt = 1 / fps
-  const tmp = await mkdtemp(path.join(os.tmpdir(), 'sf-loop-'))
-  try {
-    const headFile = path.join(tmp, 'head.gray')
-    const tailFile = path.join(tmp, 'tail.gray')
-    // Tail frames are the last *shown* frames, so the window opens one step before eLo.
-    const tailAt = Math.max(0, b.eLo - dt)
-    await Promise.all([
-      grab(inputPath, b.sLo, b.sHi - b.sLo + dt / 2, fps, preVf, headFile, signal),
-      // …and runs one frame past eHi so even the last candidate has its "next" frame.
-      grab(inputPath, tailAt, b.eHi - tailAt + 1.5 * dt, fps, preVf, tailFile, signal),
-    ])
-    const [head, tail] = await Promise.all([sigs(headFile), sigs(tailFile)])
-    return scoreLoops(head, b.sLo, tail, tailAt, fps, b, asked)
-  } finally {
-    await rm(tmp, { recursive: true, force: true })
   }
 }

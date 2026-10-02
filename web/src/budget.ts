@@ -1,12 +1,12 @@
 import type { StickerSpec } from './types.js'
 
-export const WEBP_TARGET = 480 * 1024
-export const MIN_MOTION_FPS = 24
+/** WhatsApp's StickerPackValidator rejects an animated sticker over 500 × 1024 bytes. */
+const HARD_CAP_BYTES = 500 * 1024
+/** Mirrors the server's encode target (server/src/budget.ts). */
+export const WEBP_TARGET = HARD_CAP_BYTES - 4 * 1024
 export const MAX_STICKER_FPS = 30
-export const MAX_STICKER_SEC = 6
-
-const KEYFRAME_BYTES = 25_000
-const DELTA_BYTES = 3_800
+/** StickerPackValidator: 10s per animated sticker. */
+export const MAX_STICKER_SEC = 10
 
 export function capFps(sourceFps: number): number {
   const n = Math.round(sourceFps)
@@ -25,64 +25,14 @@ export function fpsChoices(sourceFps: number): number[] {
 }
 
 /**
- * Next preset length after a byte-budget failure at `len`. The encoder's `fitSeconds`
- * is projected from a q50 sample while the ladder can still reach q30, so it undershoots
- * (Cat: said 3.1s, 4.2s fits) — bisect towards it. A near miss is measured at q30 and
- * accurate, so it and the final try take the safe figure. Null when there is nothing
- * shorter worth trying.
+ * Next preset length after a byte-budget failure at `len`: the encoder's own figure,
+ * scaled from the cheapest rung it could still reach. Null when nothing shorter is left.
  */
-export function nextFitLength(len: number, fitSeconds: number, finalTry: boolean): number | null {
+export function nextFitLength(len: number, fitSeconds: number): number | null {
   if (!(fitSeconds < len - 0.05)) return null
-  const safe = finalTry || len - fitSeconds < 0.6
-  const next = safe ? fitSeconds - 0.1 : (fitSeconds + len) / 2
-  return Math.max(0.5, Math.floor(Math.min(next, len - 0.1) * 10) / 10)
+  return Math.max(0.5, Math.floor(Math.min(fitSeconds, len - 0.1) * 10) / 10)
 }
 
-export function fpsSteps(sourceFps: number): number[] {
-  const top = capFps(sourceFps)
-  if (top <= MIN_MOTION_FPS) return [top]
-  return [top, MIN_MOTION_FPS]
-}
-
-export function estimatedBytes(durationSec: number, fps: number): number {
-  const frames = Math.max(1, Math.round(Math.max(0, durationSec) * fps))
-  return KEYFRAME_BYTES + (frames - 1) * DELTA_BYTES
-}
-
-export function maxSecondsForMotion(fps: number): number {
-  const f = Math.max(1, fps)
-  for (let tenths = MAX_STICKER_SEC * 10; tenths >= 3; tenths--) {
-    const s = tenths / 10
-    if (estimatedBytes(s, f) <= WEBP_TARGET) return s
-  }
-  return 0.3
-}
-
-/** Where the trim opens: the whole clip, capped at 6s and at what this fps can fit. */
-export function openingTrimEnd(durationSec: number, sourceFps: number): number {
-  const duration = Math.max(0, durationSec)
-  const keep = maxSecondsForMotion(capFps(sourceFps))
-  return Math.min(duration, MAX_STICKER_SEC, keep)
-}
-
-export function motionBudget(durationSec: number, sourceFps: number): {
-  fps: number
-  ok: boolean
-  tight: boolean
-  maxSeconds: number
-} {
-  const fps = capFps(sourceFps)
-  const maxSeconds = maxSecondsForMotion(fps)
-  return {
-    fps,
-    ok: durationSec <= MAX_STICKER_SEC + 0.01,
-    tight: durationSec > maxSeconds + 0.01,
-    maxSeconds,
-  }
-}
-
-/** WhatsApp's hard ceiling; WEBP_TARGET is the margin we aim inside. */
-const HARD_CAP_BYTES = 500 * 1024
 const SSIM_GOOD = 0.93
 const SSIM_FLOOR = 0.85
 

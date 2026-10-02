@@ -87,7 +87,7 @@ public class MainActivity extends AppCompatActivity
         loader.setListener(this);
 
         bindViews();
-        adapter = new StickerAdapter(this, loader.packDir(), this);
+        adapter = new StickerAdapter(this, loader, this);
         RecyclerView grid = findViewById(R.id.stickerGrid);
         grid.setLayoutManager(new GridLayoutManager(this, getResources().getInteger(R.integer.grid_cols)));
         grid.setAdapter(adapter);

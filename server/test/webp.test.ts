@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { convertToAnimatedWebp, collapseHolds, unknownImg2webpFlag } from '../src/webp.ts'
+import { convertToAnimatedWebp, collapseHolds, unknownImg2webpFlag, WebpBudgetError } from '../src/webp.ts'
+import { WEBP_TARGET } from '../src/budget.ts'
 
 function run(bin: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -36,9 +37,24 @@ test('collapseHolds merges consecutive near-identical frames', () => {
     return a
   }
   const sigs = [noise(3), noise(5), noise(2), moved(120), moved(200), flat(50)]
-  const held = collapseHolds(sigs, 33)
-  assert.deepEqual(held.map(h => h.durationMs), [99, 33, 33, 33], 'noise collapses, motion does not')
+  const held = collapseHolds(sigs, 30)
+  assert.deepEqual(held.map(h => h.durationMs), [100, 33, 34, 33], 'noise collapses, motion does not')
   assert.deepEqual(held.map(h => h.index), [0, 3, 4, 5])
+})
+
+test('frame durations add up to the exact clip length', () => {
+  // 6s at 24fps is 144 frames of 41.67ms; a flat 42ms each ran 48ms long.
+  const sigs = Array.from({ length: 144 }, (_, i) => new Uint8Array(256).fill(i))
+  const held = collapseHolds(sigs, 24)
+  assert.equal(held.reduce((s, h) => s + h.durationMs, 0), 6000)
+  assert.ok(held.every(h => h.durationMs === 41 || h.durationMs === 42))
+})
+
+test('a budget failure scales the trim hint from the cheapest reachable rung', () => {
+  // Gave up at q90 with 2000KB, but q30 would land at 600KB: 6s → ~5s, not 1.4s.
+  const err = new WebpBudgetError(2_000 * 1024, 6, 30, 90, 600 * 1024)
+  assert.equal(err.maxSeconds, 4.9)
+  assert.match(err.message, /2000KB at q90/)
 })
 
 test('a still clip collapses to a handful of frames', async () => {
@@ -60,7 +76,7 @@ test('a still clip collapses to a handful of frames', async () => {
     // mux to a static WebP, which WhatsApp refuses inside an animated pack.
     assert.ok(r.frames >= 2, `must stay animated, got ${r.frames} frame(s)`)
     assert.ok(r.frames <= 4, `holds should collapse 60 red frames, got ${r.frames}`)
-    assert.ok(r.sizeBytes <= 480 * 1024, `size=${r.sizeBytes}`)
+    assert.ok(r.sizeBytes <= WEBP_TARGET, `size=${r.sizeBytes}`)
     assert.deepEqual({ w: r.width, h: r.height }, { w: 512, h: 512 })
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -83,7 +99,7 @@ test('short 30fps clip stays 30fps and under 500KB', async () => {
     })
     assert.equal(r.fps, 30)
     assert.ok(r.frames >= 28, `frames=${r.frames}`)
-    assert.ok(r.sizeBytes <= 480 * 1024, `size=${r.sizeBytes}`)
+    assert.ok(r.sizeBytes <= WEBP_TARGET, `size=${r.sizeBytes}`)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

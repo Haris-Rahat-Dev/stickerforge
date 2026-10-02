@@ -25,9 +25,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Pulls a built pack from the StickerForge server and lays it out flat in filesDir/stickers/,
- * which is exactly where StickerContentProvider reads. manifest.json is written last, so
- * WhatsApp never sees a half-downloaded pack. Every callback arrives on the main thread.
+ * Pulls a built pack from the StickerForge server into filesDir/stickers/&lt;identifier&gt;/,
+ * which is exactly where StickerContentProvider reads. Each pack has its own folder, so
+ * loading one never touches another WhatsApp already holds. manifest.json is written
+ * last, so WhatsApp never sees a half-downloaded pack. Every callback arrives on the main thread.
  */
 final class PackLoader {
 
@@ -53,7 +54,8 @@ final class PackLoader {
     private static final int MANIFEST_CAP = 1 << 20;
     private static final int EMIT_MS = 60;
 
-    private final File packDir;
+    private final File root;
+    private volatile File packDir;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean running = new AtomicBoolean();
@@ -68,13 +70,15 @@ final class PackLoader {
     private volatile List<StickerSlot> items;
 
     PackLoader(Context context) {
-        packDir = new File(context.getApplicationContext().getFilesDir(), "stickers");
+        root = new File(context.getApplicationContext().getFilesDir(), StickerContentProvider.STICKERS);
+        packDir = root;
     }
 
     void setListener(Listener listener) {
         this.listener = listener;
     }
 
+    /** Folder of the pack currently loaded (or loading). */
     File packDir() {
         return packDir;
     }
@@ -190,6 +194,7 @@ final class PackLoader {
         }
         rawManifest = json;
         manifest = parsed;
+        packDir = new File(root, parsed.identifier);
         return parsed;
     }
 

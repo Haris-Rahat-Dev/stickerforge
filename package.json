@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "WhatsApp video sticker maker — trim, crop, compress to spec-compliant WebM/VP9",
+  "description": "WhatsApp video sticker maker — trim, crop, compress to spec-compliant animated WebP",
   "scripts": {
     "dev": "concurrently -k \"tsx watch server/src/index.ts\" \"vite\"",
     "build": "tsc -p server/tsconfig.json && vite build",

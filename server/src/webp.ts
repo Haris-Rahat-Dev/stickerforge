@@ -4,9 +4,9 @@ import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { buildFilters } from './convert.js'
-import { estimatedBytes, firstMuxNeverFits, fpsSteps, MAX_STICKER_SEC, planSpan, projectAnimatedBytes, projectedNeverFits, secondsThatFit, skipFpsBeforeMux, WEBP_TARGET, type SizeSample } from './budget.js'
+import { BAIL_MARGIN, fpsSteps, lowestQuality, MAX_STICKER_SEC, planLadder, qualityCurve, qualityLadder, secondsThatFit, WEBP_TARGET, type SizeSample } from './budget.js'
 import { concatPrefix, keptSeconds, type Span } from './spans.js'
-import type { ConvertSettings } from './types.js'
+import type { ConvertSettings, CropRect, FitMode } from './types.js'
 
 /**
  * The running encode's abort signal, ambient so every ffmpeg/cwebp/img2webp spawned
@@ -14,9 +14,12 @@ import type { ConvertSettings } from './types.js'
  * Discarded preset encodes otherwise run to completion and hold an encode slot.
  */
 export const encodeSignal = new AsyncLocalStorage<AbortSignal>()
-const spawnOpts = (): { signal?: AbortSignal } => {
+
+/** No single ffmpeg/libwebp step on a ≤10s sticker legitimately runs this long. */
+const SPAWN_TIMEOUT_MS = 10 * 60 * 1000
+const spawnOpts = (): { signal?: AbortSignal; timeout: number; killSignal: NodeJS.Signals } => {
   const signal = encodeSignal.getStore()
-  return signal ? { signal } : {}
+  return { ...(signal ? { signal } : {}), timeout: SPAWN_TIMEOUT_MS, killSignal: 'SIGKILL' }
 }
 
 export type WebpOptions = Omit<ConvertSettings, 'speed' | 'spans'> & {
@@ -124,13 +127,13 @@ export class WebpBudgetError extends Error {
   readonly maxSeconds: number
   readonly sizeBytes: number
   /**
-   * `atQ` is the rung that gave it away, not the last one on the ladder — the point of
-   * projecting is to stop before burning the rest, so the message must not imply the
-   * encoder tried everything when it deliberately didn't.
+   * `sizeBytes`/`atQ` say what gave it away — a real mux or a projection, possibly well
+   * above the floor. The trim hint is scaled from `floorBytes`, the size at the cheapest
+   * rung the ladder could still reach: scaling from a q90 mux told users to cut a clip
+   * that fits at q30 down to a third of its length.
    */
-  constructor(sizeBytes: number, durationSec: number, fps: number, atQ: number) {
-    const ratio = WEBP_TARGET / Math.max(1, sizeBytes)
-    const maxSeconds = Math.min(6, Math.max(0.5, Math.floor(durationSec * ratio * 10) / 10))
+  constructor(sizeBytes: number, durationSec: number, fps: number, atQ: number, floorBytes = sizeBytes) {
+    const maxSeconds = secondsThatFit(durationSec, floorBytes)
     super(`Won't fit at ${Math.round(fps)}fps (${Math.round(sizeBytes / 1024)}KB at q${atQ}). Trim to ~${maxSeconds}s to keep motion.`)
     this.name = 'WebpBudgetError'
     this.maxSeconds = maxSeconds
@@ -165,15 +168,23 @@ const SIG_SIDE = 16
 const HOLD_MEAN_MAX = 0.5
 const HOLD_PEAK_MAX = 2
 
+/**
+ * Where frame `i` starts, in whole ms. Durations are differences of these edges, so the
+ * rounding never accumulates: 24fps alternates 42/41ms and 6s stays 6000ms, where a flat
+ * 42ms per frame ran 0.8% slow and drifted off the editor's playhead.
+ */
+const frameEdge = (i: number, fps: number): number => Math.round(i * 1000 / fps)
+
 /** Merge consecutive near-identical frames into one longer frame. Motion fps stays; stills don't burn the 500KB budget. */
-export function collapseHolds(sigs: Uint8Array[], frameMs: number): { index: number; durationMs: number }[] {
-  const out: { index: number; durationMs: number }[] = []
+export function collapseHolds(sigs: Uint8Array[], fps: number): { index: number; durationMs: number }[] {
+  const starts: number[] = []
   for (let i = 0; i < sigs.length; i++) {
-    const last = out[out.length - 1]
-    if (last && isHold(sigs[last.index], sigs[i])) last.durationMs += frameMs
-    else out.push({ index: i, durationMs: frameMs })
+    if (!starts.length || !isHold(sigs[starts[starts.length - 1]], sigs[i])) starts.push(i)
   }
-  return out
+  return starts.map((index, k) => ({
+    index,
+    durationMs: frameEdge(starts[k + 1] ?? sigs.length, fps) - frameEdge(index, fps),
+  }))
 }
 
 export function isHold(a: Uint8Array, b: Uint8Array): boolean {
@@ -189,12 +200,17 @@ export function isHold(a: Uint8Array, b: Uint8Array): boolean {
   return true
 }
 
+function splitSigs(buf: Buffer): Uint8Array[] {
+  const stride = SIG_SIDE * SIG_SIDE
+  const sigs: Uint8Array[] = []
+  for (let off = 0; off + stride <= buf.length; off += stride) sigs.push(buf.subarray(off, off + stride))
+  return sigs
+}
+
 /**
  * Frames that survive a video re-encode are never byte-identical even when the
- * scene is frozen — compressor noise changes every pixel. Hashing the PNGs (the
- * old approach) therefore collapsed almost nothing on real footage, so a held
- * still cost a full delta frame each time. Shrinking each extracted frame to a 9×8
- * gray strip and comparing 64-bit fingerprints does collapse.
+ * scene is frozen — compressor noise changes every pixel — so frames are compared as
+ * 16×16 gray fingerprints instead of hashes.
  */
 async function frameSignatures(framesDir: string, count: number, tmp: string): Promise<Uint8Array[]> {
   if (count === 0) return []
@@ -203,107 +219,136 @@ async function frameSignatures(framesDir: string, count: number, tmp: string): P
     '-i', path.join(framesDir, 'f%04d.png'),
     '-vf', `scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`, '-f', 'rawvideo', '-y', raw,
   ])
-  const buf = await readFile(raw)
-  const stride = SIG_SIDE * SIG_SIDE
-  const sigs: Uint8Array[] = []
-  for (let off = 0; off + stride <= buf.length; off += stride) sigs.push(buf.subarray(off, off + stride))
-  return sigs
+  return splitSigs(await readFile(raw))
+}
+
+interface Framing {
+  speed: number
+  crop: CropRect | null
+  fit: FitMode
+  padColor: string
+  cropPos: number
+  border: boolean
 }
 
 /**
- * Cheap stand-in for the real extract: 16×16 gray frames, same hold rule.
- * Used to skip a fps that cannot fit before writing 512px PNGs and muxing them.
- * A failure returns 0 so the caller encodes anyway.
+ * The sticker's own picture at `fps`. Speed and frame decimation come first so crop and
+ * the lanczos scale only touch frames that ship — at 8× or from a 60fps phone clip the
+ * old order scaled up to ten frames for every one it kept.
  */
-export async function probeHoldCount(
-  inputPath: string,
-  start: number,
-  srcSpan: number,
-  fps: number,
-  preVf: string,
-  tmp: string,
-  concat: string | null = null,
-): Promise<number> {
+function stickerChain(f: Framing, fps: number): string {
+  const cropF = f.crop ? `crop=${f.crop.w}:${f.crop.h}:${f.crop.x}:${f.crop.y},` : ''
+  return `setpts=PTS/${f.speed},fps=${fps},${cropF}${buildFilters(f.fit, f.padColor, f.cropPos, f.border)}`
+}
+
+/**
+ * Input and filter arguments for the kept spans. One span seeks with -ss/-t. Several
+ * seek to just before the first and trim relative to that point, so a cut at 50s no
+ * longer decodes the first 50s of the source on every probe and encode.
+ */
+function sourceArgs(inputPath: string, spans: Span[], chain: string): string[] {
+  if (spans.length < 2) {
+    const s = spans[0]
+    return ['-ss', String(s.start), '-t', String(Math.max(0.1, s.end - s.start)), '-i', inputPath, '-vf', chain]
+  }
+  const offset = Math.max(0, spans[0].start - 1)
+  const until = spans[spans.length - 1].end - offset + 0.5
+  // A concat references [0:v] once per span, which a simple -vf graph rejects.
+  return [
+    '-ss', String(offset), '-t', String(until), '-i', inputPath,
+    '-filter_complex', `${concatPrefix(spans, offset)}${chain}[out]`, '-map', '[out]',
+  ]
+}
+
+/**
+ * How many frames the encoder will actually mux over the kept spans: the real sticker
+ * chain at 16×16, same hold rule. A failure returns 0 so the caller encodes anyway.
+ */
+async function probeHoldCount(inputPath: string, spans: Span[], f: Framing, fps: number, tmp: string): Promise<number> {
   const raw = path.join(tmp, `probe-${Math.round(fps * 100)}.gray`)
-  const chain = [preVf, `fps=${fps}`, `scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`]
-    .filter(Boolean).join(',')
-  // Several spans: concat joins them up front. A concat references [0:v] twice, which a
-  // simple -vf graph rejects, so it must run as -filter_complex with a mapped output.
-  const inputArgs = concat ? ['-i', inputPath] : ['-ss', String(start), '-t', String(srcSpan), '-i', inputPath]
-  const filterArgs = concat ? ['-filter_complex', `${concat}${chain}[out]`, '-map', '[out]'] : ['-vf', chain]
+  const chain = `${stickerChain(f, fps)},scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`
   try {
-    await run('ffmpeg', [
-      ...inputArgs, ...filterArgs, '-f', 'rawvideo', '-y', raw,
-    ])
+    await run('ffmpeg', [...sourceArgs(inputPath, spans, chain), '-f', 'rawvideo', '-y', raw])
   } catch {
     return 0
   }
-  const buf = await readFile(raw).catch(() => Buffer.alloc(0))
-  const stride = SIG_SIDE * SIG_SIDE
-  const sigs: Uint8Array[] = []
-  for (let off = 0; off + stride <= buf.length; off += stride) sigs.push(buf.subarray(off, off + stride))
-  if (sigs.length === 0) return 0
-  return collapseHolds(sigs, Math.max(8, Math.round(1000 / fps))).length
+  const sigs = splitSigs(await readFile(raw).catch(() => Buffer.alloc(0)))
+  return sigs.length ? collapseHolds(sigs, fps).length : 0
 }
 
+async function holdItems(framesDir: string, frames: string[], fps: number, tmp: string): Promise<HeldFrame[]> {
+  const sigs = await frameSignatures(framesDir, frames.length, tmp)
+  // If the signatures don't line up one-for-one, extract no holds rather than
+  // mis-pairing a frame with the wrong fingerprint.
+  const runs = sigs.length === frames.length
+    ? collapseHolds(sigs, fps)
+    : frames.map((_, i) => ({ index: i, durationMs: frameEdge(i + 1, fps) - frameEdge(i, fps) }))
+  return runs.map(h => ({ path: frames[h.index], durationMs: Math.max(8, h.durationMs) }))
+}
+
+/** Sticker seconds a size sample covers: enough deltas to average, cheap enough to run live. */
+const SAMPLE_SEC = 1.5
+
 /**
- * Eight real frames, muxed at the cheapest quality, scaled to the held count.
- * Returns null when the sample cannot be built — the caller encodes anyway.
- * This is the check the flat byte model cannot make: detailed footage overruns it.
+ * Bytes per muxed frame for this footage at each quality: a contiguous run of real
+ * frames (true deltas, not every-Nth frames that cost nearly a keyframe each), from ~40%
+ * into the first span where motion has usually got going, holds collapsed like the
+ * real encode. Null when the sample cannot be built.
  */
-export async function measureSpanBytes(
-  inputPath: string,
-  start: number,
-  srcSpan: number,
-  fps: number,
-  preVf: string,
-  heldFrames: number,
-  tmp: string,
-  concat: string | null = null,
-): Promise<number | null> {
-  if (heldFrames <= 1 || fps <= 0) return null
+async function sampleFrameCost(
+  inputPath: string, spans: Span[], f: Framing, fps: number, qs: number[], tmp: string,
+): Promise<SizeSample[] | null> {
+  const first = spans[0]
+  const firstLen = first.end - first.start
+  const srcSec = Math.min(firstLen, SAMPLE_SEC * f.speed)
+  const from = first.start + Math.max(0, (firstLen - srcSec) * 0.4)
   const dir = path.join(tmp, `sample-${Math.round(fps * 100)}`)
   await rm(dir, { recursive: true, force: true })
   await mkdir(dir, { recursive: true })
-  const every = Math.max(1, Math.round(Math.max(srcSpan, 0.1) * fps / 8))
-  const chain = [preVf, `fps=${fps}`, `select=not(mod(n\\,${every}))`].filter(Boolean).join(',')
-  const inputArgs = concat ? ['-i', inputPath] : ['-ss', String(start), '-t', String(srcSpan), '-i', inputPath]
-  const filterArgs = concat ? ['-filter_complex', `${concat}${chain}[out]`, '-map', '[out]'] : ['-vf', chain]
   try {
     await run('ffmpeg', [
-      ...inputArgs, ...filterArgs, '-frames:v', '8', '-y', path.join(dir, 'f%04d.png'),
+      '-ss', String(from), '-t', String(Math.max(0.1, srcSec)), '-i', inputPath,
+      '-vf', stickerChain(f, fps), path.join(dir, 'f%04d.png'),
     ])
-    const names = (await readdir(dir)).filter(f => f.endsWith('.png')).sort()
-    if (names.length < 2) return null
-    const paths = names.map(f => path.join(dir, f))
-    const keyPath = path.join(dir, 'key.webp')
-    await run('cwebp', [paths[0], '-q', '50', '-m', '4', '-quiet', '-o', keyPath])
-    const keyBytes = (await stat(keyPath)).size
-    const samplePath = path.join(dir, 'sample.webp')
-    const frameMs = Math.max(8, Math.round(1000 / fps))
-    await muxImg2Webp(paths.map(p => ({ path: p, durationMs: frameMs })), samplePath, 50)
-    return projectAnimatedBytes(keyBytes, (await stat(samplePath)).size, paths.length, heldFrames)
+    const frames = (await readdir(dir)).filter(n => n.endsWith('.png')).sort().map(n => path.join(dir, n))
+    if (frames.length === 0) return null
+    const held = await holdItems(dir, frames, fps, tmp)
+    const out: SizeSample[] = []
+    for (const q of qs) {
+      const file = path.join(dir, `s-q${q}.webp`)
+      await muxImg2Webp(held, file, q)
+      out.push({ q, bytes: (await stat(file)).size / held.length })
+    }
+    return out
   } catch {
     return null
   }
 }
 
-async function holdItems(framesDir: string, frames: string[], frameMs: number, tmp: string): Promise<HeldFrame[]> {
-  const sigs = await frameSignatures(framesDir, frames.length, tmp)
-  // If the signatures don't line up one-for-one, extract no holds rather than
-  // mis-pairing a frame with the wrong fingerprint.
-  if (sigs.length !== frames.length) return frames.map(f => ({ path: f, durationMs: frameMs }))
-  return collapseHolds(sigs, frameMs).map(h => ({
-    path: frames[h.index],
-    durationMs: Math.max(8, h.durationMs),
-  }))
+interface TierModel {
+  /** Frames the encoder will mux at this fps after hold-merging. */
+  held: number
+  bytesAt: (q: number) => number
+}
+
+/**
+ * Projected sticker bytes at one fps: the hold count over the whole kept range times the
+ * sampled per-frame cost. Measured at q70 (where a higher fps gives up) and the floor
+ * (where the encode fails), so the two decisions that matter are read, not extrapolated.
+ */
+async function modelTier(inputPath: string, spans: Span[], f: Framing, fps: number, lowestQ: number, tmp: string): Promise<TierModel | null> {
+  const held = await probeHoldCount(inputPath, spans, f, fps, tmp)
+  if (held <= 0) return null
+  const cost = await sampleFrameCost(inputPath, spans, f, fps, lowestQ < 70 ? [70, lowestQ] : [90, 70], tmp)
+  if (!cost) return null
+  const perFrame = qualityCurve(cost[0], cost[1])
+  return { held, bytesAt: q => perFrame(q) * held }
 }
 
 /**
  * A still image → motionless animated WebP: frame it to 512×512, then mux two
  * identical frames so it counts as animated (WhatsApp rejects a static sticker in
- * an animated pack). Bypasses VP9 entirely — libvpx can spin forever on a looped
- * still — so it's deterministic and fast.
+ * an animated pack).
  */
 export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult> {
   const { inputPath, outPath, fit, padColor, crop, cropPos, border } = opts
@@ -330,16 +375,13 @@ export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult
 export interface EstimateResult {
   fits: boolean
   keptSeconds: number
-  fps: number             // requested (capped) frame rate
+  fps: number             // the rate the encoder's ladder would land on
   effectiveFps: number    // after hold-merging — the average the sticker will report
   projectedKB: number     // estimated size at the quality it would land on
-  qNeeded: number         // 30..90 the encoder would settle at
+  qNeeded: number         // the rung it would land on
   quality: 'crisp' | 'good' | 'soft' | 'very soft'
-  maxSeconds: number      // longest kept time that would still fit at this framing
+  maxSeconds: number      // longest kept time (source seconds) that would still fit
 }
-
-// bytes(q) ≈ bytes50 · (q/50)², the same quality curve the ladder's projections assume.
-const QUALITY_EXP = 2
 
 function qualityLabel(q: number): EstimateResult['quality'] {
   if (q >= 75) return 'crisp'
@@ -348,96 +390,55 @@ function qualityLabel(q: number): EstimateResult['quality'] {
   return 'very soft'
 }
 
+const framingOf = (o: Pick<ConvertSettings, 'crop' | 'fit' | 'padColor' | 'cropPos' | 'border'> & { speed?: number }): Framing => ({
+  speed: o.speed && o.speed > 0 ? o.speed : 1,
+  crop: o.crop, fit: o.fit, padColor: o.padColor, cropPos: o.cropPos, border: o.border,
+})
+
 /**
- * Cheap live projection of what the current framing/trim would produce, without a full
- * encode. One 16×16 hold probe + one 8-frame sample mux (~1–2s), then the ladder's own
- * quality curve says which q it would land on and whether it fits 500KB. An estimate,
- * not a guarantee — the real encode still fails closed at [WEBP_TARGET].
+ * Live projection of what the current framing/trim would produce, without a full
+ * encode: the encoder's own fps/quality ladder run on sampled sizes, so the fps and
+ * quality shown are the ones the encode lands on. An estimate, not a guarantee — the
+ * real encode still fails closed at WEBP_TARGET.
  */
 export async function estimateSticker(inputPath: string, opts: ConvertSettings): Promise<EstimateResult> {
   const spans = opts.spans && opts.spans.length ? opts.spans : [{ start: opts.start, end: opts.end }]
   const kept = keptSeconds(spans)
-  const fps = opts.fps
-  const speed = opts.speed || 1
-  // Seconds of sticker, not source: sped up, the same kept span plays shorter.
-  const outDur = kept / speed
-  const concat = concatPrefix(spans)
-  const cropF = opts.crop ? `crop=${opts.crop.w}:${opts.crop.h}:${opts.crop.x}:${opts.crop.y},` : ''
-  const filters = buildFilters(opts.fit, opts.padColor, opts.cropPos, opts.border)
-  const start = spans[0].start
+  const framing = framingOf(opts)
+  const outDur = kept / framing.speed
+  const steps = fpsSteps(opts.fps)
+  const lowestQ = lowestQuality(opts.minQ)
+  // Bias conservative: the sample is one stretch of the clip, which can be calmer than
+  // the rest. Better to say "trim a hair" than green-light a clip that fails on Add.
+  const target = WEBP_TARGET * 0.94
   const tmp = fs_mkdtemp()
   await mkdir(tmp, { recursive: true })
   try {
-    // Effective frame count after hold-merging, over the whole kept span (cheap 16×16).
-    const held = await probeHoldCount(inputPath, start, kept, fps, `${cropF}setpts=PTS/${speed}`, tmp, concat)
-    const effFrames = held > 1 ? held : Math.max(2, Math.round(outDur * fps))
-
-    // Real per-frame cost from a CONTIGUOUS sample (distinct delta frames at the true
-    // frame rate), not the every-Nth subsample measureSpanBytes uses. Sampled from ~40%
-    // into the first span — the opening is often calmer than the sustained motion, which
-    // would under-project a busy clip.
-    const sampleSec = Math.min(kept, 1.5)
-    const firstLen = spans[0].end - spans[0].start
-    const sampleStart = start + Math.max(0, (Math.min(firstLen, kept) - sampleSec) * 0.4)
-    const dir = path.join(tmp, 'sample')
-    await mkdir(dir, { recursive: true })
-    await run('ffmpeg', [
-      '-ss', String(sampleStart), '-t', String(sampleSec), '-i', inputPath,
-      '-vf', `${cropF}${filters},setpts=PTS/${speed},fps=${fps}`, `${dir}/f%04d.png`,
-    ])
-    const names = (await readdir(dir)).filter(f => f.endsWith('.png')).sort()
-    const frameMs = Math.max(8, Math.round(1000 / fps))
-    const list = names.map(f => ({ path: path.join(dir, f), durationMs: frameMs }))
-
-    let bytesAt: (q: number) => number
-    if (list.length >= 2) {
-      const size = async (q: number): Promise<number> => {
-        const out = path.join(dir, `s-q${q}.webp`)
-        await muxImg2Webp(list, out, q)
-        return (await stat(out)).size / list.length   // per-frame bytes at this quality
-      }
-      // Two points give WebP's real (flat) quality curve — the (q/50)² model was wrong.
-      const per50 = await size(50)
-      const per30 = await size(30)
-      const b50 = per50 * effFrames
-      const b30 = per30 * effFrames
-      const e = b30 > 0 && b50 > 0 && b50 !== b30
-        ? Math.min(2, Math.max(0.3, Math.log(b50 / b30) / Math.log(50 / 30)))
-        : QUALITY_EXP
-      bytesAt = (q: number) => b50 * Math.pow(q / 50, e)
-    } else {
-      const b50 = estimatedBytes(outDur, fps)
-      bytesAt = (q: number) => b50 * Math.pow(q / 50, QUALITY_EXP)
+    const tiers = new Map<number, TierModel>()
+    for (const [i, fps] of steps.entries()) {
+      const model = await modelTier(inputPath, spans, framing, fps, lowestQ, tmp)
+      if (!model) throw new Error('size sample failed')
+      tiers.set(fps, model)
+      // A rate that keeps q70 is where the encoder stops; lower rates are never tried.
+      if (i < steps.length - 1 && model.bytesAt(70) <= target) break
     }
-
-    // Bias conservative: the sample is the clip's opening, which can be calmer than a
-    // busy tail, so leave headroom below 500KB. Better to say "trim a hair" than to green-
-    // light a clip that then fails closed on Add.
-    const targetEst = WEBP_TARGET * 0.94
-    const fits = bytesAt(30) <= targetEst
-    // The encoder lands on the HIGHEST q that fits (ladder runs 90→30, stops at first fit).
-    const qNeeded = solveQ(bytesAt, targetEst)
-    const effectiveFps = Math.min(fps, Math.max(1, Math.round(effFrames / Math.max(0.1, outDur))))
+    const land = planLadder(steps, lowestQ, (fps, q) => tiers.get(fps)?.bytesAt(q) ?? Infinity, target)
+    const held = tiers.get(land.fps)?.held ?? Math.round(outDur * land.fps)
     return {
-      fits,
+      fits: land.fits,
       keptSeconds: Math.round(kept * 100) / 100,
-      fps,
-      effectiveFps,
-      projectedKB: Math.round(bytesAt(qNeeded) / 1024),
-      qNeeded,
-      quality: qualityLabel(qNeeded),
-      // Source seconds — what the trim control moves.
-      maxSeconds: fits ? Math.min(MAX_STICKER_SEC * speed, kept) : secondsThatFit(kept, bytesAt(30), targetEst),
+      fps: land.fps,
+      effectiveFps: Math.min(land.fps, Math.max(1, Math.round(held / Math.max(0.1, outDur)))),
+      projectedKB: Math.round(land.bytes / 1024),
+      qNeeded: land.q,
+      quality: qualityLabel(land.q),
+      maxSeconds: land.fits
+        ? Math.min(MAX_STICKER_SEC * framing.speed, kept)
+        : Math.round(secondsThatFit(outDur, land.floorBytes, target) * framing.speed * 10) / 10,
     }
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }
-}
-
-/** Highest q in [30,90] whose projected size is under target; 30 if none fit. */
-function solveQ(bytesAt: (q: number) => number, target: number): number {
-  for (let q = 90; q >= 30; q--) if (bytesAt(q) <= target) return q
-  return 30
 }
 
 /**
@@ -452,120 +453,86 @@ export async function convertToAnimatedWebp(
   opts: WebpOptions,
   progress?: (p: number, stage: string) => void,
 ): Promise<WebpResult> {
-  const { inputPath, outPath, start, end, speed = 1, fps, fit, padColor, crop, cropPos, border, minQ } = opts
-  // Several kept ranges are concatenated up front; one range keeps the -ss/-t path.
+  const { inputPath, outPath, start, end, fps, minQ } = opts
   const spans: Span[] = opts.spans && opts.spans.length ? opts.spans : [{ start, end }]
-  const concat = concatPrefix(spans)
-  const single = planSpan(start, end, speed)
-  // With a concat the source span is the joined length; -t is not used.
-  const srcSpan = concat ? keptSeconds(spans) : single.srcSpan
-  // setpts=PTS/speed runs after the concat too, so the sticker is kept/speed long.
-  const outDur = concat ? keptSeconds(spans) / (speed > 0 ? speed : 1) : single.outDur
+  const framing = framingOf(opts)
+  const outDur = Math.max(0.3, keptSeconds(spans) / framing.speed)
   const tmp = fs_mkdtemp()
   const framesDir = path.join(tmp, 'frames')
   await mkdir(framesDir, { recursive: true })
 
   try {
-    const cropF = crop ? `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},` : ''
-    const filters = buildFilters(fit, padColor, cropPos, border)
     const steps = fpsSteps(fps)
     // Floor for the LAST fps only. A busy photographic clip at 512²/24fps needs q≈30
-    // to fit 4s under 500KB — flooring at 50 rejected clips that q30 encodes fine. The
-    // projections use this floor too, so they only fail closed when even q30 can't fit.
-    const lowestQ = Math.min(70, Math.max(30, minQ ?? 30))
-    // Keep q ≥ 70 while we still have fps to give. Crushing to 20 at 30fps is the
-    // pixelation users saw; 24fps at q70 beats 30fps mush. Only the last fps drops below.
-    const qualitiesAtFps = [90, 80, 70]
-    const lastResort = [60, 50, 40, 30].filter(q => q >= lowestQ)
+    // to fit 4s under 500KB; presets ask for 50 and refit shorter instead.
+    const lowestQ = lowestQuality(minQ)
     let lastSize = 0
     let lastFps = steps[0]
-    let lastHeld: HeldFrame[] = []
-    let tier = 0
 
-    for (const outFps of steps) {
-      const isLast = outFps === steps[steps.length - 1]
+    for (const [tier, outFps] of steps.entries()) {
+      const isLast = tier === steps.length - 1
       const base = tier / steps.length
       const span = 1 / steps.length
-      // 16×16 holds are enough to know a higher fps cannot fit. Skip its 512px
-      // extract and muxes, and try the next rate. The last rate still encodes:
-      // the byte model overestimates flat animation.
-      const heldGuess = await probeHoldCount(
-        inputPath, start, srcSpan, outFps, `${cropF}setpts=PTS/${speed}`, tmp, concat,
-      )
-      if (skipFpsBeforeMux(heldGuess, outFps, isLast)) {
-        progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
-        tier++
-        continue
-      }
+      const rungs = qualityLadder(isLast, lowestQ)
+      const floorQ = rungs[rungs.length - 1]
 
-      // A few real frames at q50. The 4KB model said 5.1s would fit and this
-      // footage came out at 1007KB — find that out before extracting every frame.
+      // A sampled projection before extracting every frame: a rate that misses even at
+      // its cheapest rung is skipped (or, last, fails with a trim that fits), and the
+      // ladder starts near where the clip lands instead of muxing q90 and q80 for nothing.
       progress?.(base, 'Checking size')
-      const projected = await measureSpanBytes(
-        inputPath, start, srcSpan, outFps, `${cropF}${filters},setpts=PTS/${speed}`, heldGuess, tmp, concat,
-      )
-      if (projected != null && projected > WEBP_TARGET) {
-        if (isLast) throw new WebpBudgetError(projected, outDur, outFps, lowestQ)
-        progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
-        tier++
-        continue
+      const model = await modelTier(inputPath, spans, framing, outFps, lowestQ, tmp)
+      let startAt = 0
+      if (model) {
+        const floor = model.bytesAt(floorQ)
+        if (floor > WEBP_TARGET * BAIL_MARGIN) {
+          if (isLast) throw new WebpBudgetError(floor, outDur, outFps, floorQ)
+          progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
+          continue
+        }
+        // ponytail: one rung of headroom above the projected landing. A projection that is
+        // pessimistic by two or more rungs costs that much quality; climb back up if seen.
+        const landing = rungs.findIndex(q => model.bytesAt(q) <= WEBP_TARGET)
+        startAt = Math.max(0, (landing < 0 ? rungs.length - 1 : landing) - 1)
       }
 
       await rm(framesDir, { recursive: true, force: true })
       await mkdir(framesDir, { recursive: true })
       progress?.(base, `Extracting ${Math.round(outFps)}fps frames`)
-      const chain = `${cropF}${filters},setpts=PTS/${speed},fps=${outFps}`
-      const extractInput = concat
-        ? ['-i', inputPath]
-        : ['-ss', String(start), '-t', String(srcSpan), '-i', inputPath]
-      const extractFilter = concat
-        ? ['-filter_complex', `${concat}${chain}[out]`, '-map', '[out]']
-        : ['-vf', chain]
       await runWithProgress('ffmpeg', [
         '-progress', 'pipe:1', '-nostats',
-        ...extractInput,
-        ...extractFilter,
-        `${framesDir}/f%04d.png`
-      ], f => progress?.(base + f * span * 0.5, `Extracting ${Math.round(outFps)}fps frames`), srcSpan)
+        ...sourceArgs(inputPath, spans, stickerChain(framing, outFps)),
+        `${framesDir}/f%04d.png`,
+      ], f => progress?.(base + f * span * 0.5, `Extracting ${Math.round(outFps)}fps frames`), outDur)
 
       const frames = (await readdir(framesDir)).filter(f => f.endsWith('.png')).sort()
         .map(f => path.join(framesDir, f))
       if (frames.length === 0) throw new Error('no frames extracted')
-      const durationMs = Math.max(8, Math.round(1000 / outFps))
       lastFps = outFps
-      lastHeld = await holdItems(framesDir, frames, durationMs, tmp)
+      const held = await holdItems(framesDir, frames, outFps, tmp)
       progress?.(base + span * 0.6, 'Measuring motion')
 
-      const ladder = isLast ? [...qualitiesAtFps, ...lastResort] : qualitiesAtFps
-      // Held frames are free, so the ratio between what we mux and what we extracted
-      // is what carries the size projection across to the cheapest rung.
-      const frameRatio = lastHeld.length / frames.length
+      const ladder = rungs.slice(startAt)
       const samples: SizeSample[] = []
       let nextFps = false
       for (const [n, q] of ladder.entries()) {
         progress?.(base + span * (0.65 + 0.35 * (n / ladder.length)), `Muxing q${q}`)
-        await muxImg2Webp(lastHeld, outPath, q)
+        await muxImg2Webp(held, outPath, q)
         const { size } = await stat(outPath)
         lastSize = size
-        if (size <= WEBP_TARGET) return await verify(outPath, lastHeld[0]?.path ?? null, tmp)
+        if (size <= WEBP_TARGET) return await verify(outPath, held[0]?.path ?? null, tmp)
         samples.push({ q, bytes: size })
-        if (samples.length === 1 && firstMuxNeverFits(size, q, lowestQ, WEBP_TARGET)) {
-          if (isLast) throw new WebpBudgetError(size, outDur, outFps, q)
-          nextFps = true
-          break
-        }
-        // Eight full muxes of a clip that could never fit is minutes of a 1 GB VM
-        // doing nothing useful. Two points give the quality curve; if its lowest rung
-        // still misses, stop this fps. A lower rate may still fit; only the last
-        // rate fails the encode.
-        if (projectedNeverFits(samples, frameRatio, lowestQ, WEBP_TARGET)) {
-          if (isLast) throw new WebpBudgetError(size, outDur, outFps, q)
-          nextFps = true
-          break
+        // Two full muxes give this clip's own quality curve. If even its floor misses
+        // clearly, the remaining muxes are minutes of a 1 GB VM doing nothing useful.
+        if (samples.length >= 2) {
+          const floor = qualityCurve(samples[samples.length - 2], samples[samples.length - 1])(floorQ)
+          if (floor > WEBP_TARGET * BAIL_MARGIN) {
+            if (isLast) throw new WebpBudgetError(size, outDur, outFps, q, floor)
+            nextFps = true
+            break
+          }
         }
       }
       if (nextFps) progress?.(base + span, `${Math.round(outFps)}fps won't fit — trying a lower rate`)
-      tier++
     }
     throw new WebpBudgetError(lastSize, outDur, lastFps, lowestQ)
   } finally {

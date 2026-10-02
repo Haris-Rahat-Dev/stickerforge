@@ -110,10 +110,10 @@ export function clipPrints(inputPath: string, fps: number, preVf = ''): Promise<
   const key = `${inputPath}|${fps}|${preVf}`
   let hit = printCache.get(key)
   if (!hit) {
-    const chain = [preVf, `fps=${fps}`, `scale=${SIDE}:${SIDE}:flags=area,format=gray`].filter(Boolean).join(',')
+    const chain = [`fps=${fps}`, preVf, `scale=${SIDE}:${SIDE}:flags=area,format=gray`].filter(Boolean).join(',')
     hit = new Promise<Uint8Array[]>((resolve, reject) => {
       const p = spawn('ffmpeg', ['-v', 'error', '-i', inputPath,
-        '-vf', chain, '-f', 'rawvideo', 'pipe:1'])
+        '-vf', chain, '-f', 'rawvideo', 'pipe:1'], { timeout: 120_000, killSignal: 'SIGKILL' })
       const chunks: Buffer[] = []
       p.stdout.on('data', d => chunks.push(d))
       p.on('close', c => {
@@ -133,6 +133,16 @@ export function clipPrints(inputPath: string, fps: number, preVf = ''): Promise<
 }
 
 const RANK: Record<SeamVerdict, number> = { seamless: 0, smooth: 1, noticeable: 2, jump: 3, hard: 4 }
+
+/**
+ * Source-time sampling rate that lands one sample on each frame the sticker shows.
+ * Consecutive sticker frames are speed/fps apart in the source, so the rate is fps/speed:
+ * a finer grid rates sub-frame hitches as jumps, a coarser one misses real ones.
+ */
+export function seamFps(fps: number, speed: number): number {
+  const s = speed > 0 ? speed : 1
+  return Math.min(60, Math.max(1, fps / s))
+}
 
 /** Frames covering [from, to] (source seconds) from the whole-clip pass, and the time of the first. */
 function slice(prints: Uint8Array[], fps: number, from: number, to: number): { frames: Uint8Array[]; at: number } {
@@ -155,7 +165,7 @@ function scoreSeam(prints: Uint8Array[], fps: number, b: LoopBounds, asked: { st
  * Score every seam of `spans` and, for `only` (or all when omitted), move its two ends
  * to the smoothest join in reach. Seams run in order on the updated pieces, so a piece
  * whose start moved at seam i−1 is respected at seam i. Cuts may grow the kept total up
- * to the 6s cap; the loop only trims.
+ * to `maxKept` source seconds (the sticker cap × speed); the loop only trims.
  */
 export async function planSeams(opts: {
   inputPath: string
@@ -164,8 +174,9 @@ export async function planSeams(opts: {
   fps: number
   preVf: string
   only?: number | null
+  maxKept?: number
 }): Promise<SeamPlan> {
-  const { inputPath, duration, fps, preVf, only } = opts
+  const { inputPath, duration, fps, preVf, only, maxKept = MAX_STICKER_SEC } = opts
   const pieces = opts.spans.map(s => ({ ...s }))
   const n = pieces.length
   const W = SEAM_SEARCH_SEC
@@ -175,7 +186,7 @@ export async function planSeams(opts: {
   // Measuring it over the kept pieces moved it whenever a press moved a cut, so pressing
   // again kept "improving" the same join.
   const typical = movingStep(prints)
-  let headroom = Math.max(0, MAX_STICKER_SEC - keptSeconds(pieces))
+  let headroom = Math.max(0, maxKept - keptSeconds(pieces))
   let grew = 0
   const seams: SeamReport[] = []
 
@@ -222,7 +233,7 @@ export async function planSeams(opts: {
 
   return {
     seams,
-    spans: normalizeSpans(pieces, duration),
+    spans: normalizeSpans(pieces, duration, maxKept),
     grew: Math.round(grew * 1000) / 1000,
     typical,
     warnings: blankEdges(prints, fps, pieces),

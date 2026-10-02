@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { capFps, firstMuxNeverFits, fitSpanSeconds, fpsSteps, maxSecondsForMotion, motionBudget, openingTrimEnd, projectAnimatedBytes, projectedNeverFits, secondsThatFit, skipFpsBeforeMux, WEBP_TARGET } from '../src/budget.ts'
+import { capFps, fpsSteps, lowestQuality, MAX_STICKER_SEC, planLadder, qualityCurve, qualityLadder, secondsThatFit, WEBP_HARD_CAP, WEBP_TARGET } from '../src/budget.ts'
+
+const KB = 1024
 
 test('fps ladder keeps 30 then 24, never the old 8fps dump', () => {
   assert.deepEqual(fpsSteps(30), [30, 24])
@@ -15,87 +17,64 @@ test('slow sources stay at source fps — no upsample, no further drop', () => {
   assert.equal(capFps(16.67), 17)
 })
 
-test('motion budget prefers ~4s at 30fps over dropping fps', () => {
-  const b = motionBudget(10, 30)
-  assert.equal(b.ok, false)
-  assert.equal(b.tight, true)
-  assert.equal(b.fps, 30)
-  assert.equal(b.maxSeconds, 4.1)
-  assert.equal(motionBudget(4, 30).ok, true)
-  assert.equal(motionBudget(4, 30).tight, false)
-  assert.equal(motionBudget(5, 30).ok, true)
-  assert.equal(motionBudget(5, 30).tight, true)
+test('limits match WhatsApp\'s StickerPackValidator', () => {
+  assert.equal(MAX_STICKER_SEC, 10)
+  assert.equal(WEBP_HARD_CAP, 500 * 1024)
+  assert.ok(WEBP_TARGET < WEBP_HARD_CAP && WEBP_TARGET > 490 * 1024)
 })
 
-test('6s WhatsApp cap still binds slow gifs', () => {
-  assert.equal(maxSecondsForMotion(15), 6)
-})
-
-test('opening trim keeps a slow clip whole and only shortens busy 30fps', () => {
-  assert.equal(openingTrimEnd(5, 15), 5)
-  assert.equal(openingTrimEnd(8, 15), 6)
-  assert.equal(openingTrimEnd(3, 30), 3)
-  assert.equal(openingTrimEnd(10, 30), 4.1)
-})
-
-test('a busy higher fps is skipped before mux; the last fps and a held clip are not', () => {
-  assert.equal(skipFpsBeforeMux(180, 30, false), true)
-  assert.equal(skipFpsBeforeMux(180, 30, true), false)
-  assert.equal(skipFpsBeforeMux(40, 30, false), false)
-  assert.equal(skipFpsBeforeMux(0, 30, false), false)
-})
-
-test('fit span keeps the probed window when holds fit', () => {
-  assert.equal(fitSpanSeconds(8, 30, 40), 6)
-  assert.equal(fitSpanSeconds(5, 15, 70), 5)
-  assert.equal(fitSpanSeconds(10, 30, 180), 4.1)
-})
-
-test('a short mux scales to the held frame count', () => {
-  // 25KB key + 4KB deltas. Eight frames stand in for 122.
-  assert.equal(projectAnimatedBytes(25_000, 25_000 + 7 * 4_000, 8, 122), 25_000 + 121 * 4_000)
+test('quality stays ≥70 while a lower fps remains; only the last fps reaches the floor', () => {
+  assert.deepEqual(qualityLadder(false, 30), [90, 80, 70])
+  assert.deepEqual(qualityLadder(true, 30), [90, 80, 70, 60, 50, 40, 30])
+  assert.deepEqual(qualityLadder(true, lowestQuality(50)), [90, 80, 70, 60, 50])
+  assert.deepEqual(qualityLadder(true, lowestQuality(90)), [90, 80, 70])
+  assert.equal(lowestQuality(undefined), 30)
 })
 
 test('a projected miss shortens the span instead of keeping the optimistic trim', () => {
-  assert.equal(secondsThatFit(5.1, 1007 * 1024), 2.4)
-  assert.equal(secondsThatFit(5.1, 400 * 1024), 5.1)
+  assert.equal(secondsThatFit(5.1, 1007 * KB), 2.5)
+  assert.equal(secondsThatFit(5.1, 400 * KB), 5.1)
 })
 
-test('the first mux bails when a squared quality drop still misses', () => {
-  assert.equal(firstMuxNeverFits(2_000 * 1024, 90, 50, WEBP_TARGET), true)
-  assert.equal(firstMuxNeverFits(700 * 1024, 90, 50, WEBP_TARGET), false)
+test('the quality curve passes through both measurements and extrapolates along them', () => {
+  // The real failure: detailed night footage at 2600KB on q90 and 1900KB on q80.
+  const at = qualityCurve({ q: 90, bytes: 2_600 * KB }, { q: 80, bytes: 1_900 * KB })
+  assert.equal(Math.round(at(90) / KB), 2600)
+  assert.equal(Math.round(at(80) / KB), 1900)
+  assert.ok(at(50) > WEBP_TARGET, 'still over the cap at q50: the clip can never fit')
 })
 
-const KB = 1024
-
-test('projection bails on a clip that could never fit', () => {
-  // The real failure: 5s of detailed night footage that ended at 747KB on q50.
-  // Two muxes at the top of the ladder project 543KB — already over the cap.
-  const samples = [{ q: 90, bytes: 2_600 * KB }, { q: 80, bytes: 1_900 * KB }]
-  assert.equal(projectedNeverFits(samples, 1, 50, WEBP_TARGET), true)
+test('a flat or nonsensical pair falls back to a clamped exponent, not a divide-by-zero', () => {
+  const flat = qualityCurve({ q: 90, bytes: 5_000 * KB }, { q: 80, bytes: 5_000 * KB })
+  assert.ok(Number.isFinite(flat(30)) && flat(30) < 5_000 * KB)
+  const same = qualityCurve({ q: 70, bytes: 100 }, { q: 70, bytes: 100 })
+  assert.ok(Number.isFinite(same(30)))
 })
 
-test('projection leaves a recoverable clip alone', () => {
-  // 620KB at q90 is over target but projects to 326KB by q50 — keep going.
-  const samples = [{ q: 90, bytes: 620 * KB }, { q: 80, bytes: 545 * KB }]
-  assert.equal(projectedNeverFits(samples, 1, 50, WEBP_TARGET), false)
+// A size model where bytes scale with fps and fall with quality like a real clip.
+const model = (perFrameAt70: number, seconds: number) =>
+  (fps: number, q: number): number => perFrameAt70 * Math.pow(q / 70, 1.5) * fps * seconds
+
+test('the ladder lands at the top fps when q70 or better fits there', () => {
+  const land = planLadder([30, 24], 30, model(2_500, 5))
+  assert.equal(land.fits, true)
+  assert.equal(land.fps, 30)
+  assert.ok(land.q >= 70)
 })
 
-test('held frames are credited, so a mostly-still long clip survives', () => {
-  // Expensive per frame, but 120 of 180 frames collapse into a handful of holds.
-  const samples = [{ q: 90, bytes: 4_000 * KB }, { q: 80, bytes: 2_900 * KB }]
-  assert.equal(projectedNeverFits(samples, 1, 50, WEBP_TARGET), true, 'every frame muxed: hopeless')
-  assert.equal(projectedNeverFits(samples, 1 / 3, 50, WEBP_TARGET), false, 'two thirds held: reachable')
+test('the ladder gives up a frame rate before it gives up quality below 70', () => {
+  // 30fps misses at q70; 24fps fits at q70 — never 30fps at q60.
+  const land = planLadder([30, 24], 30, model(3_700, 5))
+  assert.equal(land.fits, true)
+  assert.equal(land.fps, 24)
+  assert.equal(land.q, 70)
 })
 
-test('projection needs two points before it will say anything', () => {
-  const one = [{ q: 90, bytes: 9_000 * KB }]
-  assert.equal(projectedNeverFits(one, 1, 50, WEBP_TARGET), false)
-  assert.equal(projectedNeverFits([], 1, 50, WEBP_TARGET), false)
-})
-
-test('a flat curve falls back to the clamped exponent, not a divide-by-zero', () => {
-  // Identical sizes give no usable slope; the clamp keeps the reading conservative.
-  const flat = [{ q: 90, bytes: 5_000 * KB }, { q: 80, bytes: 5_000 * KB }]
-  assert.equal(projectedNeverFits(flat, 1, 50, WEBP_TARGET), true)
+test('a clip that misses everywhere reports the floor bytes a shorter trim scales from', () => {
+  const bytesAt = model(20_000, 5)
+  const land = planLadder([30, 24], 50, bytesAt)
+  assert.equal(land.fits, false)
+  assert.equal(land.fps, 24)
+  assert.equal(land.q, 50)
+  assert.equal(land.floorBytes, bytesAt(24, 50))
 })

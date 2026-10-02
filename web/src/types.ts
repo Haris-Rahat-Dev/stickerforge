@@ -113,11 +113,6 @@ export interface Job {
   fitSeconds?: number
 }
 
-export interface BatchJobInfo {
-  jobId: string
-  fileId: string
-}
-
 export interface UploadProgress {
   key: string
   name: string
