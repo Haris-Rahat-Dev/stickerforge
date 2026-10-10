@@ -14,7 +14,7 @@ const walk = (dir: string): string[] => {
   }
 }
 
-const STRIP_SUFFIXES = ['-strip.jpg', '-film.jpg']
+const STRIP_SUFFIXES = ['-film.jpg.tmp.jpg', '-strip.jpg', '-film.jpg']
 
 export interface ReapInput {
   dataDir: string
@@ -84,14 +84,30 @@ export function reapOrphans(input: ReapInput): ReapResult {
   // "-film.jpg" the taller one the timeline tiles today; both die with their source.
   const ids = new Set(input.liveFileIds)
   sweep(input.dataDir, p => {
+    // An in-flight filmstrip write is never a finished strip, live id or not.
+    if (p.endsWith('-film.jpg.tmp.jpg')) return true
     const suffix = STRIP_SUFFIXES.find(s => p.endsWith(s))
     if (!suffix) return false
     return !ids.has(path.basename(p).slice(0, -suffix.length))
   })
 
   // A build that crashed leaves <code>.next behind. It is never the live pack — that
-  // is the same path without the suffix — so it is always garbage.
+  // is the same path without the suffix — so it is always garbage. A crash mid-swap
+  // leaves <code>.prev: with the live pack gone it is the pack, and is restored.
   for (const entry of walk(input.packs)) {
+    if (entry.endsWith('.prev')) {
+      const live = entry.slice(0, -'.prev'.length)
+      try {
+        if (!fs.existsSync(live)) {
+          fs.renameSync(entry, live)
+          console.warn(`reap: restored ${path.basename(live)} from an interrupted pack swap`)
+        } else {
+          fs.rmSync(entry, { recursive: true, force: true })
+          removed.push(path.relative(input.dataDir, entry))
+        }
+      } catch { /* leave it */ }
+      continue
+    }
     if (!entry.endsWith('.next')) continue
     try {
       fs.rmSync(entry, { recursive: true, force: true })

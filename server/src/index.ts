@@ -103,6 +103,32 @@ const upload = multer({
 const STAGED_QUOTA_BYTES = 3 * 1024 * 1024 * 1024
 
 const files = new Map<string, FileRecord>()
+
+// Bytes of uploads in flight per user, so parallel uploads can't each pass the quota
+// on their own, and an obviously over-quota upload is refused before it is written.
+const uploading = new Map<string, number>()
+const stagedBytes = (uid: string): number =>
+  [...files.values()].filter(f => f.owner === uid).reduce((s, f) => s + f.sizeBytes, 0)
+
+const reserveUpload: express.RequestHandler = (req, res, next) => {
+  const declared = Number(req.headers['content-length']) || 0
+  const inFlight = uploading.get(req.userId) ?? 0
+  if (stagedBytes(req.userId) + inFlight + declared > STAGED_QUOTA_BYTES) {
+    // Discard the body, then reply: answering mid-upload resets the socket and the
+    // browser shows "is the server running?" instead of this. Nothing touches disk.
+    req.resume()
+    req.on('end', () => res.status(413).json({ error: 'Too many uploads waiting — build a pack or discard some first' }))
+    return
+  }
+  uploading.set(req.userId, inFlight + declared)
+  res.on('close', () => {
+    const left = (uploading.get(req.userId) ?? 0) - declared
+    if (left > 0) uploading.set(req.userId, left)
+    else uploading.delete(req.userId)
+  })
+  next()
+}
+
 const jobs = new Map<string, Job>()
 // Live encodes that can be stopped. A two-pass VP9 run holds a queue slot for ~90s,
 // so an abandoned tab has to be able to give it back.
@@ -264,10 +290,10 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
   }
 }
 
-app.post('/api/upload', upload.single('file'), ah(async (req, res) => {
+app.post('/api/upload', reserveUpload, upload.single('file'), ah(async (req, res) => {
   try {
     if (!req.file) { res.status(400).json({ error: 'No file provided' }); return }
-    const staged = [...files.values()].filter(f => f.owner === req.userId).reduce((s, f) => s + f.sizeBytes, 0)
+    const staged = stagedBytes(req.userId)
     if (staged + req.file.size > STAGED_QUOTA_BYTES) {
       fs.rmSync(req.file.path, { force: true })
       res.status(413).json({ error: 'Too many uploads waiting — build a pack or discard some first' })
@@ -775,9 +801,13 @@ async function assemblePack(
   }
   fs.writeFileSync(out('manifest.json'), JSON.stringify(manifest, null, 2))
 
-  // Everything is on disk and readable — only now replace the live pack.
-  fs.rmSync(packDir, { force: true, recursive: true })
+  // Rename-aside swap: the live pack is only ever moved, never deleted, until the new
+  // one is in place. A crash in between leaves <code>.prev, which boot restores.
+  const prev = packDir + '.prev'
+  fs.rmSync(prev, { force: true, recursive: true })
+  if (fs.existsSync(packDir)) fs.renameSync(packDir, prev)
   fs.renameSync(stage, packDir)
+  fs.rmSync(prev, { force: true, recursive: true })
   onProgress?.({ progress: 1, stage: 'Done' })
   // `included` is what actually shipped in the manifest — only those stickers'
   // sources may be retired by the caller.

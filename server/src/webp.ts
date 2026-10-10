@@ -308,7 +308,9 @@ async function sampleFrameCost(
   try {
     await run('ffmpeg', [
       '-ss', String(from), '-t', String(Math.max(0.1, srcSec)), '-i', inputPath,
-      '-vf', stickerChain(f, fps), path.join(dir, 'f%04d.png'),
+      '-vf', stickerChain(f, fps),
+      // Temp frames: zlib level 1 halves extraction time; img2webp reads them once.
+      '-compression_level', '1', path.join(dir, 'f%04d.png'),
     ])
     const frames = (await readdir(dir)).filter(n => n.endsWith('.png')).sort().map(n => path.join(dir, n))
     if (frames.length === 0) return null
@@ -516,7 +518,7 @@ export async function convertToAnimatedWebp(
       await runWithProgress('ffmpeg', [
         '-progress', 'pipe:1', '-nostats',
         ...sourceArgs(inputPath, spans, stickerChain(framing, outFps)),
-        `${framesDir}/f%04d.png`,
+        '-compression_level', '1', `${framesDir}/f%04d.png`,
       ], f => progress?.(base + f * span * 0.5, `Extracting ${Math.round(outFps)}fps frames`), outDur)
 
       const frames = (await readdir(framesDir)).filter(f => f.endsWith('.png')).sort()

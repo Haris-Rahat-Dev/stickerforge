@@ -91,6 +91,28 @@ test('a crashed build leaves a .next that the next boot clears, but never a live
   assert.ok(r.removed.some(x => x.endsWith('.next')))
 })
 
+test('an interrupted pack swap is restored from .prev when the live pack is missing', () => {
+  const root = mk()
+  fs.mkdirSync(path.join(root, 'packs', 'abc123.prev'))
+  fs.writeFileSync(path.join(root, 'packs', 'abc123.prev', 'manifest.json'), '{}')
+  const r = reapOrphans(base(root))
+  assert.ok(fs.existsSync(path.join(root, 'packs', 'abc123', 'manifest.json')), 'the swapped-out pack is restored')
+  assert.equal(fs.existsSync(path.join(root, 'packs', 'abc123.prev')), false)
+  assert.ok(!r.removed.some(x => x.endsWith('.prev')), 'a restore is not a removal')
+})
+
+test('a leftover .prev next to a live pack is removed', () => {
+  const root = mk()
+  for (const n of ['abc123', 'abc123.prev']) {
+    fs.mkdirSync(path.join(root, 'packs', n))
+    fs.writeFileSync(path.join(root, 'packs', n, 'manifest.json'), '{}')
+  }
+  const r = reapOrphans(base(root))
+  assert.ok(fs.existsSync(path.join(root, 'packs', 'abc123', 'manifest.json')), 'the live pack is untouched')
+  assert.equal(fs.existsSync(path.join(root, 'packs', 'abc123.prev')), false)
+  assert.ok(r.removed.some(x => x.endsWith('.prev')))
+})
+
 test('reaping an empty or missing tree is a no-op', () => {
   const root = mk()
   fs.rmSync(path.join(root, 'outputs'), { recursive: true })
