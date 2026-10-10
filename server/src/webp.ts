@@ -345,6 +345,21 @@ async function modelTier(inputPath: string, spans: Span[], f: Framing, fps: numb
   return { held, bytesAt: q => perFrame(q) * held }
 }
 
+// ponytail: tiny insertion-order cache; the editor estimates then encodes the same
+// settings, and sources are immutable uploads. Evicts oldest past 32 entries.
+const tierCache = new Map<string, TierModel>()
+async function cachedTier(inputPath: string, spans: Span[], f: Framing, fps: number, lowestQ: number, tmp: string): Promise<TierModel | null> {
+  const key = JSON.stringify([inputPath, spans, f, fps, lowestQ])
+  const hit = tierCache.get(key)
+  if (hit) return hit
+  const model = await modelTier(inputPath, spans, f, fps, lowestQ, tmp)
+  if (model) {
+    tierCache.set(key, model)
+    if (tierCache.size > 32) tierCache.delete(tierCache.keys().next().value!)
+  }
+  return model
+}
+
 /**
  * A still image → motionless animated WebP: frame it to 512×512, then mux two
  * identical frames so it counts as animated (WhatsApp rejects a static sticker in
@@ -416,7 +431,7 @@ export async function estimateSticker(inputPath: string, opts: ConvertSettings):
   try {
     const tiers = new Map<number, TierModel>()
     for (const [i, fps] of steps.entries()) {
-      const model = await modelTier(inputPath, spans, framing, fps, lowestQ, tmp)
+      const model = await cachedTier(inputPath, spans, framing, fps, lowestQ, tmp)
       if (!model) throw new Error('size sample failed')
       tiers.set(fps, model)
       // A rate that keeps q70 is where the encoder stops; lower rates are never tried.
@@ -480,7 +495,7 @@ export async function convertToAnimatedWebp(
       // its cheapest rung is skipped (or, last, fails with a trim that fits), and the
       // ladder starts near where the clip lands instead of muxing q90 and q80 for nothing.
       progress?.(base, 'Checking size')
-      const model = await modelTier(inputPath, spans, framing, outFps, lowestQ, tmp)
+      const model = await cachedTier(inputPath, spans, framing, outFps, lowestQ, tmp)
       let startAt = 0
       if (model) {
         const floor = model.bytesAt(floorQ)

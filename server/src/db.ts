@@ -41,6 +41,13 @@ function rewriteJson(rowId: string, table: string, mutate: (rec: Record<string, 
   db!.prepare(`UPDATE ${table} SET json = ? WHERE id = ?`).run(JSON.stringify(mutate(rec)), rowId)
 }
 
+// Multi-statement writes (delete-then-insert membership, a pack and its rows) must land
+// whole or not at all: a crash between them leaves a pack half-rewritten.
+function tx(fn: () => void): void {
+  db!.exec('BEGIN')
+  try { fn(); db!.exec('COMMIT') } catch (err) { db!.exec('ROLLBACK'); throw err }
+}
+
 export function initDb(dataDir: string): void {
   DATA = path.resolve(dataDir)
   db = new DatabaseSync(path.join(DATA, 'stickerforge.db'))
@@ -91,17 +98,19 @@ function normaliseStoredPaths(): void {
   const backup = `${file}.pre-path-normalise.bak`
   if (!fs.existsSync(backup)) fs.copyFileSync(file, backup)
 
-  for (const { table, rows } of dirty) {
-    for (const r of rows) {
-      rewriteJson(r.id, table, rec => {
-        const next = { ...rec }
-        for (const key of ['path', 'outputPath', 'trayPath'] as const) {
-          if (typeof next[key] === 'string') next[key] = toStored(toResolved(String(next[key])))
-        }
-        return next
-      })
+  tx(() => {
+    for (const { table, rows } of dirty) {
+      for (const r of rows) {
+        rewriteJson(r.id, table, rec => {
+          const next = { ...rec }
+          for (const key of ['path', 'outputPath', 'trayPath'] as const) {
+            if (typeof next[key] === 'string') next[key] = toStored(toResolved(String(next[key])))
+          }
+          return next
+        })
+      }
     }
-  }
+  })
   console.log(`db: re-rooted stored paths in ${total} row(s) onto ${DATA}`)
 }
 
@@ -188,13 +197,17 @@ export function bumpPackVersion(code: string): number {
 export function setPackStickers(code: string, jobIds: string[]): void {
   const del = db!.prepare('DELETE FROM pack_stickers WHERE code = ?')
   const ins = db!.prepare('INSERT INTO pack_stickers (code, position, job_id) VALUES (?, ?, ?)')
-  del.run(code)
-  jobIds.forEach((jid, i) => ins.run(code, i, jid))
+  tx(() => {
+    del.run(code)
+    jobIds.forEach((jid, i) => ins.run(code, i, jid))
+  })
 }
 
 export function deletePack(code: string): void {
-  db!.prepare('DELETE FROM pack_stickers WHERE code = ?').run(code)
-  db!.prepare('DELETE FROM packs WHERE code = ?').run(code)
+  tx(() => {
+    db!.prepare('DELETE FROM pack_stickers WHERE code = ?').run(code)
+    db!.prepare('DELETE FROM packs WHERE code = ?').run(code)
+  })
 }
 
 // Cross-pack reuse means a sticker's output files belong to no single pack. Nothing

@@ -132,15 +132,22 @@ for (const job of loadJobs()) {
 // Drafts the user never took into a pack (tab closed mid-review). A day's grace so a
 // restart doesn't yank one someone is looking at right now.
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1000
+// A failed or cancelled job is never persisted and its files are already gone, so the map
+// entry is just a leak. An hour's grace so the UI can still read a just-failed job.
+const FAILED_TTL_MS = 60 * 60 * 1000
 function sweepDrafts(when: string): void {
   let stale = 0
+  let forgotten = 0
   for (const job of [...jobs.values()]) {
     if (job.draft && job.status !== 'running' && Date.now() - job.startedAt > DRAFT_TTL_MS && countPacksWithJob(job.id) === 0) {
       discardSticker(job.id)
       stale++
+    } else if ((job.status === 'error' || job.status === 'cancelled') && Date.now() - job.startedAt > FAILED_TTL_MS) {
+      jobs.delete(job.id)
+      forgotten++
     }
   }
-  if (stale) console.log(`${when}: discarded ${stale} unreviewed draft encode(s)`)
+  if (stale || forgotten) console.log(`${when}: discarded ${stale} unreviewed draft encode(s), forgot ${forgotten} failed job(s)`)
 }
 sweepDrafts('boot')
 // A long-running server would otherwise only reclaim abandoned drafts on its next restart.
@@ -345,29 +352,48 @@ app.get('/api/video/:id', (req, res) => {
 // Tall enough for a crisp ~64px thumbnail on a 2× screen.
 const FILM_H = 128
 
+// Two tabs opening one pack ask for the same strip, and a killed ffmpeg used to leave a
+// partial JPEG that was then served forever. Build once per id, into a temp name.
+const filmstripsInFlight = new Map<string, Promise<void>>()
+
 app.get('/api/filmstrip/:id', ah(async (req, res) => {
   const rec = ownedFile(req, req.params.id)
   if (!rec) { res.status(404).json({ error: 'Not found' }); return }
   const out = path.join(DATA, `${req.params.id}-film.jpg`)
   try {
     if (!fs.existsSync(out)) {
-      // A sprite of four frames a second (8–80), each FILM_H tall at the source's own
-      // aspect. The timeline tiles it into proportioned thumbnails; it must never be
-      // stretched as one image (that squeezed 30+ frames into slivers).
-      const duration = Math.max(rec.meta.duration, 0.5)
-      const n = Math.min(80, Math.max(8, Math.ceil(duration * 4)))
-      const fpsArg = n / duration
-      await probeQueue.run(() => new Promise<void>((resolve, reject) => {
-        const p = spawn('ffmpeg', [
-          '-i', rec.path,
-          '-vf', `fps=${fpsArg.toFixed(4)},scale=-2:${FILM_H},tile=${n}x1`,
-          '-q:v', '4',
-          '-frames:v', '1',
-          '-y', out
-        ], { timeout: 120_000, killSignal: 'SIGKILL' })
-        p.on('close', (c: number | null) => c === 0 ? resolve() : reject(new Error(`filmstrip failed (${c})`)))
-        p.on('error', reject)
-      }))
+      let build = filmstripsInFlight.get(req.params.id)
+      if (!build) {
+        build = (async () => {
+          // A sprite of four frames a second (8–80), each FILM_H tall at the source's own
+          // aspect. The timeline tiles it into proportioned thumbnails; it must never be
+          // stretched as one image (that squeezed 30+ frames into slivers).
+          const duration = Math.max(rec.meta.duration, 0.5)
+          const n = Math.min(80, Math.max(8, Math.ceil(duration * 4)))
+          const fpsArg = n / duration
+          const tmp = `${out}.tmp.jpg`
+          try {
+            await probeQueue.run(() => new Promise<void>((resolve, reject) => {
+              const p = spawn('ffmpeg', [
+                '-i', rec.path,
+                '-vf', `fps=${fpsArg.toFixed(4)},scale=-2:${FILM_H},tile=${n}x1`,
+                '-q:v', '4',
+                '-frames:v', '1',
+                '-y', tmp
+              ], { timeout: 120_000, killSignal: 'SIGKILL' })
+              p.on('close', (c: number | null) => c === 0 ? resolve() : reject(new Error(`filmstrip failed (${c})`)))
+              p.on('error', reject)
+            }))
+            // Only a complete strip is published under the name every reader looks for.
+            fs.renameSync(tmp, out)
+          } catch (err) {
+            fs.rmSync(tmp, { force: true })
+            throw err
+          }
+        })().finally(() => filmstripsInFlight.delete(req.params.id))
+        filmstripsInFlight.set(req.params.id, build)
+      }
+      await build
     }
     res.sendFile(out)
   } catch {
@@ -449,6 +475,17 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
     }
     const trayPath = path.join(TRAYS, `${jobId}.png`)
     await extractTray(rec.path, trayPath, settings, rec.kind)
+    // A cancel/discard can arrive while the tray is extracted, when the job is still
+    // 'running' — discardSticker has already dropped it from the map and disk, so
+    // finishing here would resurrect a job whose output no longer exists. Read the map
+    // fresh: the earlier check narrowed job.status and cannot see a mid-flight change.
+    const current = jobs.get(jobId)
+    if (!current || current !== job || current.status === 'cancelled') {
+      fs.rmSync(trayPath, { force: true })
+      fs.rmSync(outputPath, { force: true })
+      fs.rmSync(webpCachePath(jobId), { force: true })
+      return
+    }
     job.trayPath = fs.existsSync(trayPath) ? trayPath : null
     job.status = 'done'
     job.progress = 1
@@ -705,9 +742,11 @@ async function assemblePack(
           )
         }
         onProgress?.({ progress: i / total, stage: `Encoding sticker ${i + 1}/${total}` })
-        const result = await convertToAnimatedWebp({
+        // Through the limiter: a build re-encoding several cache misses would otherwise
+        // stack extra img2webp runs on top of the two editor encodes.
+        const result = await encodeQueue.run(() => convertToAnimatedWebp({
           inputPath: src.path, outPath, ...job.settings,
-        })
+        }))
         job.spec = specOf(result)
         job.webpBytes = result.sizeBytes
         job.webpFps = result.fps
@@ -946,15 +985,24 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`StickerForge running → http://localhost:${PORT}`)
 })
 
-// A deploy restarts the service mid-encode. Stop accepting, give in-flight encodes a
-// window to finish (only completed jobs are persisted, so a killed one leaves an
-// orphan output file rather than a job pointing at a half-written one), then exit.
+// A deploy restarts the service mid-encode. Stop accepting, let the encode queue drain
+// (only completed jobs are persisted, so a killed one leaves an orphan output file rather
+// than a job pointing at a half-written one), then exit. Waiting on the encode queue, not
+// on server.close's callback: an open SSE stream would always hold that the full 15s,
+// and with no connections at all it returned immediately and killed running encodes.
 let closing = false
 function shutdown(signal: string): void {
   if (closing) return
   closing = true
   console.log(`${signal}: draining ${encodeQueue.active} encode(s), ${encodeQueue.queued} queued`)
-  server.close(() => process.exit(0))
+  server.close()
+  server.closeIdleConnections()
+  const drain = setInterval(() => {
+    if (encodeQueue.active === 0 && encodeQueue.queued === 0) {
+      clearInterval(drain)
+      process.exit(0)
+    }
+  }, 250)
   setTimeout(() => process.exit(0), 15_000).unref()
 }
 for (const sig of ['SIGTERM', 'SIGINT'] as const) process.on(sig, () => shutdown(sig))
