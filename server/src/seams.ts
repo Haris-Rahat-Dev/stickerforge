@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { frameDiff, movingStep, scoreLoops, seamVerdict, type LoopBounds, type LoopResult, type SeamVerdict } from './loop.js'
 import { keptSeconds, normalizeSpans, type Span } from './spans.js'
 import { MAX_STICKER_SEC } from './budget.js'
+import { SAFE_INPUT } from './probe.js'
 
 // Every join in a sticker is a seam: the cut between piece i and piece i+1, and the loop
 // from the last piece back to the first. Each piece end belongs to exactly one seam, so
@@ -112,7 +113,7 @@ export function clipPrints(inputPath: string, fps: number, preVf = ''): Promise<
   if (!hit) {
     const chain = [`fps=${fps}`, preVf, `scale=${SIDE}:${SIDE}:flags=area,format=gray`].filter(Boolean).join(',')
     hit = new Promise<Uint8Array[]>((resolve, reject) => {
-      const p = spawn('ffmpeg', ['-v', 'error', '-i', inputPath,
+      const p = spawn('ffmpeg', ['-v', 'error', ...SAFE_INPUT, '-i', inputPath,
         '-vf', chain, '-f', 'rawvideo', 'pipe:1'], { timeout: 120_000, killSignal: 'SIGKILL' })
       const chunks: Buffer[] = []
       p.stdout.on('data', d => chunks.push(d))

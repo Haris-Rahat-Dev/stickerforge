@@ -6,6 +6,7 @@ import os from 'node:os'
 import { buildFilters } from './convert.js'
 import { BAIL_MARGIN, fpsSteps, lowestQuality, MAX_STICKER_SEC, planLadder, qualityCurve, qualityLadder, secondsThatFit, WEBP_TARGET, type SizeSample } from './budget.js'
 import { concatPrefix, keptSeconds, type Span } from './spans.js'
+import { SAFE_INPUT } from './probe.js'
 import type { ConvertSettings, CropRect, FitMode } from './types.js'
 
 /**
@@ -249,13 +250,13 @@ function stickerChain(f: Framing, fps: number): string {
 function sourceArgs(inputPath: string, spans: Span[], chain: string): string[] {
   if (spans.length < 2) {
     const s = spans[0]
-    return ['-ss', String(s.start), '-t', String(Math.max(0.1, s.end - s.start)), '-i', inputPath, '-vf', chain]
+    return ['-ss', String(s.start), '-t', String(Math.max(0.1, s.end - s.start)), ...SAFE_INPUT, '-i', inputPath, '-vf', chain]
   }
   const offset = Math.max(0, spans[0].start - 1)
   const until = spans[spans.length - 1].end - offset + 0.5
   // A concat references [0:v] once per span, which a simple -vf graph rejects.
   return [
-    '-ss', String(offset), '-t', String(until), '-i', inputPath,
+    '-ss', String(offset), '-t', String(until), ...SAFE_INPUT, '-i', inputPath,
     '-filter_complex', `${concatPrefix(spans, offset)}${chain}[out]`, '-map', '[out]',
   ]
 }
@@ -307,7 +308,7 @@ async function sampleFrameCost(
   await mkdir(dir, { recursive: true })
   try {
     await run('ffmpeg', [
-      '-ss', String(from), '-t', String(Math.max(0.1, srcSec)), '-i', inputPath,
+      '-ss', String(from), '-t', String(Math.max(0.1, srcSec)), ...SAFE_INPUT, '-i', inputPath,
       '-vf', stickerChain(f, fps),
       // Temp frames: zlib level 1 halves extraction time; img2webp reads them once.
       '-compression_level', '1', path.join(dir, 'f%04d.png'),
@@ -376,7 +377,7 @@ export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult
     const filters = buildFilters(fit, padColor, cropPos, border)
     const png = path.join(tmp, 'f.png')
     const webp = path.join(tmp, 'f.webp')
-    await run('ffmpeg', ['-y', '-i', inputPath, '-vf', `${cropF}${filters}`, '-frames:v', '1', png])
+    await run('ffmpeg', ['-y', ...SAFE_INPUT, '-i', inputPath, '-vf', `${cropF}${filters}`, '-frames:v', '1', png])
     for (const q of [90, 75, 60, 45]) {
       await run('cwebp', [png, '-q', String(q), '-quiet', '-o', webp])
       await run('webpmux', ['-frame', webp, '+250', '-frame', webp, '+250', '-loop', '0', '-o', outPath])

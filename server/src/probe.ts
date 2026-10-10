@@ -67,11 +67,13 @@ export function frameRate(s: ProbeStream): number {
  */
 const DEMUXERS = 'mov,matroska,webm,gif,avi,mpegts,flv,asf,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe,gif_pipe,apng'
 
+/** Input options for any ffmpeg that opens an upload: the same allowlist ffprobe enforced. */
+export const SAFE_INPUT = ['-protocol_whitelist', 'file', '-format_whitelist', DEMUXERS]
+
 export async function probeVideo(filePath: string): Promise<VideoMeta> {
   const { stdout } = await execFileAsync('ffprobe', [
     '-v', 'quiet',
-    '-protocol_whitelist', 'file',
-    '-format_whitelist', DEMUXERS,
+    ...SAFE_INPUT,
     '-print_format', 'json',
     '-show_format',
     '-show_streams',
@@ -174,6 +176,7 @@ export function detectCrop(inputPath: string, meta: VideoMeta): Promise<CropRect
     const p = spawn('ffmpeg', [
       '-ss', String(Math.min(0.5, meta.duration / 2)),
       '-t', String(Math.min(4, meta.duration)),
+      ...SAFE_INPUT,
       '-i', inputPath,
       '-vf', 'cropdetect=24:2:0',
       '-f', 'null', '/dev/null'

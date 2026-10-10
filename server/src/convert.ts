@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { SAFE_INPUT } from './probe.js'
 import type { ConvertSettings, FitMode, MediaKind } from './types.js'
 
 export function buildFilters(fit: FitMode, padColor = '#000000', cropPos = 0.5, border = false): string {
@@ -32,6 +33,7 @@ export function extractTray(inputPath: string, trayPath: string, s: ConvertSetti
   return new Promise((resolve) => {
     const p = spawn('ffmpeg', [
       '-ss', String(Math.max(0, first.start)), '-t', String(look),
+      ...SAFE_INPUT,
       '-i', inputPath,
       '-vf', `${pick}${cropF}${buildFilters(s.fit, s.padColor, s.cropPos, s.border)},scale=96:96:flags=lanczos`,
       '-frames:v', '1', '-y', trayPath,

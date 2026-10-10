@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { probeVideo, probeMedia, assessQuality, detectCrop } from './probe.js'
+import { probeVideo, probeMedia, assessQuality, detectCrop, SAFE_INPUT } from './probe.js'
 import { extractTray, buildFilters } from './convert.js'
 import { convertToAnimatedWebp, encodeSignal, estimateSticker, imageToAnimatedWebp, WebpBudgetError, type WebpResult } from './webp.js'
 import { capFps, maxSrcSpanForSpeed } from './budget.js'
@@ -85,7 +85,8 @@ app.use('/api', (req, res, next) => {
   res.on('finish', () => {
     const ms = Date.now() - started
     if (req.path.endsWith('/stream') || res.statusCode < 400 && ms < 250) return
-    console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} ${ms}ms`)
+    // Path only: media/SSE requests carry the ID token in ?token=.
+    console.log(`${req.method} ${req.originalUrl.split('?')[0]} → ${res.statusCode} ${ms}ms`)
   })
   next()
 })
@@ -401,6 +402,7 @@ app.get('/api/filmstrip/:id', ah(async (req, res) => {
           try {
             await probeQueue.run(() => new Promise<void>((resolve, reject) => {
               const p = spawn('ffmpeg', [
+                ...SAFE_INPUT,
                 '-i', rec.path,
                 '-vf', `fps=${fpsArg.toFixed(4)},scale=-2:${FILM_H},tile=${n}x1`,
                 '-q:v', '4',
@@ -996,7 +998,7 @@ app.get('/api/pack/:code/file/:name', (req, res) => {
 // streaming reply (NDJSON build) has already sent headers, so it just gets closed.
 app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction): void => {
   const message = err instanceof Error ? err.message : 'Internal error'
-  console.error(`${req.method} ${req.originalUrl} failed:`, message)
+  console.error(`${req.method} ${req.originalUrl.split('?')[0]} failed:`, message)
   if (res.headersSent) { res.end(); return }
   if ((err as { code?: string }).code === 'LIMIT_FILE_SIZE') { res.status(413).json({ error: 'File is over 1GB' }); return }
   res.status(500).json({ error: message })
