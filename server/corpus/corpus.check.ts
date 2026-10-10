@@ -80,7 +80,9 @@ const fixtures: Fixture[] = [
     build: () => lavfi('two-cuts', 'testsrc2=size=512x512:rate=30:duration=3'),
     start: 0.4, end: 2.8, fps: 30,
     spans: [{ start: 0.4, end: 1.2 }, { start: 2, end: 2.8 }],
-    expect: { minFrames: 40 },
+    // Busy testsrc2 misses q70 at 30fps, so the ladder lands on its 24fps floor:
+    // 1.6s × 24 ≈ 38 frames. A dropped cut would leave ~19.
+    expect: { minFrames: 38 },
   },
   {
     // WhatsApp's 10s ceiling, exercised cheaply: a held scene over the full span is
