@@ -68,7 +68,8 @@ server/src/
   webp.ts            ffmpeg frames → img2webp mixed/delta animated WebP
   jobfeed.ts         in-process job event bus (SSE fan-out)
   sticker.ts         derived editability, StickerView, emoji normalization
-  auth.ts            firebase-admin ID token verify + public-path allowlist
+  auth.ts            firebase-admin ID token verify + public-path allowlist + phone upload token
+  zip.ts             store-only zip for the pack download
   types.ts           shared models
 android/             Java + AndroidX/Material — StickerContentProvider (dependency-free) + importer screen
 data/                uploads, outputs, trays, packs, stickerforge.db (gitignored)
@@ -139,6 +140,14 @@ A sticker may belong to several packs. Membership is deduped by **jobId**, not f
 Per-sticker emojis (1–3, WhatsApp's limit) live in the job record's JSON and are written into the manifest at build time, so changing them needs a rebuild to reach the phone. `normaliseEmojis()` in `sticker.ts` enforces the range on the way in.
 
 **All stickers** is a third route listing every sticker you own, with client-side search over name, emojis, and containing pack names. Deleting there removes the sticker from every pack; removing from a pack canvas only drops the membership and lets the reference count decide.
+
+## Pack extras
+
+- **Stale packs.** `packSignature()` (name, publisher, tray, ordered jobIds + emojis) is stored as `built_sig` at build; `stale` in the pack summary means the phone has an older build — UI shows "↻ Rebuild".
+- **Tray + publisher** are per pack (`tray_job`, `publisher`); tray falls back to the first sticker with a tray.
+- **Downloads:** `GET /api/output/webp/:jobId?download=1`, `GET /api/packs/:code/download` (zip, owner-only).
+- **Captions** are drawn in the browser (`web/src/caption.ts`) to a 512² PNG, stored content-addressed in `data/captions/`, and overlaid by ffmpeg (`overlay=0:0`) — the VM's ffmpeg has no `drawtext`, and this keeps preview and encode pixel-identical.
+- **Phone share upload.** `POST /api/link` returns `stickerforge://link/<token>` (shown as a QR). The Android app stores it and sends gallery shares to `POST /api/upload` with `Authorization: Device <token>` — the only route that token opens. Relinking retires the previous token. Testing with `adb am start -a SEND` fails on MediaStore URIs (shell can't grant read); share from the real gallery.
 
 ## Verified output, not requested output
 

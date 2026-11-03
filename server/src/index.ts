@@ -15,12 +15,15 @@ import { reapOrphans } from './reap.js'
 import { planSeams, seamFps } from './seams.js'
 import { initDb, loadFiles, loadJobs, saveFile, saveJob, removeFile as dbRemoveFile,
   createPack, getPack, listPacks, renamePack, deletePack, setPackStickers, bumpPackVersion,
-  countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob } from './db.js'
-import { stickerView, normaliseEmojis, dedupeMembership } from './sticker.js'
+  setPackPublisher, setPackTray, setBuiltSig,
+  countPacksWithJob, removeJobFromAllPacks, removeJob as dbRemoveJob, linkDevice, deviceOwner } from './db.js'
+import { stickerView, normaliseEmojis, dedupeMembership, packSignature } from './sticker.js'
+import { zipStore } from './zip.js'
 import { publish, subscribe, type JobEvent } from './jobfeed.js'
 import { createAuthMiddleware } from './auth.js'
 import type { Pack, StickerSpec } from './types.js'
-import type { ConvertSettings, CropRect, FileRecord, FitMode, Job } from './types.js'
+import type { Caption, ConvertSettings, CropRect, FileRecord, FitMode, Job } from './types.js'
+import crypto from 'node:crypto'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..', '..')
@@ -30,9 +33,12 @@ const OUTPUTS = path.join(DATA, 'outputs')
 const TRAYS = path.join(DATA, 'trays')
 const WEB_CACHE = path.join(DATA, 'webp-cache')
 const PACKS = path.join(DATA, 'packs')
+// Caption bitmaps, content-addressed so every encode, estimate and rebuild of one caption
+// shares a file. ponytail: never pruned — each is a few KB; reap them if that ever adds up.
+const CAPTIONS = path.join(DATA, 'captions')
 const WEB_DIST = path.join(ROOT, 'web', 'dist')
 
-for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS, WEB_CACHE, PACKS]) fs.mkdirSync(dir, { recursive: true })
+for (const dir of [DATA, UPLOADS, OUTPUTS, TRAYS, WEB_CACHE, PACKS, CAPTIONS]) fs.mkdirSync(dir, { recursive: true })
 
 const webpCachePath = (jobId: string): string => path.join(WEB_CACHE, `${jobId}.webp`)
 
@@ -67,7 +73,8 @@ process.on('uncaughtException', err => {
 })
 
 const app = express()
-app.use(express.json())
+// Captions arrive as a rendered PNG (a few tens of KB as base64).
+app.use(express.json({ limit: '1mb' }))
 
 // Auth: firebase-admin when FIREBASE_SERVICE_ACCOUNT is set; otherwise anonymous
 // sf_uid cookie so dogfood works without Firebase. Phone pack GETs stay public.
@@ -76,7 +83,7 @@ declare global {
   namespace Express { interface Request { userId: string } }
 }
 
-app.use('/api', createAuthMiddleware())
+app.use('/api', createAuthMiddleware(deviceOwner))
 
 // One line per API call. There is no other way to read what the hosted box did, and
 // encodes are long enough that timing them matters.
@@ -207,7 +214,11 @@ if (reaped.removed.length) {
 }
 
 // Cap concurrent encodes so parallel jobs don't starve each other (or a 1 GB VM's RAM).
-const encodeQueue = createLimiter(2)
+// Two is what the 1GB E2.1.Micro holds; a bigger host (Ampere A1: 4 cores, 24GB) gets one
+// slot per core, bounded by ~1GB of RAM each for the PNG frames and img2webp.
+// ponytail: derived from the host, not configured — add an env override if a host lies.
+const ENCODE_SLOTS = Math.max(2, Math.min(os.availableParallelism(), Math.floor(os.totalmem() / 2 ** 30)))
+const encodeQueue = createLimiter(ENCODE_SLOTS)
 // The editor's own ffmpeg work — estimates, seams, filmstrips, cropdetect — shares a
 // separate small cap, so a few busy tabs can't stack decodes on top of two encodes.
 const probeQueue = createLimiter(2)
@@ -248,6 +259,32 @@ function clampPos(pos: unknown): number {
 const IMAGE_DUR = 1
 const IMAGE_FPS = 4
 
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+/**
+ * The caption the editor rendered: text, position and a 512×512 PNG. Only a well-formed
+ * PNG of exactly the sticker's canvas is accepted — anything else is no caption at all.
+ */
+function parseCaption(raw: unknown): Caption | undefined {
+  const c = raw as { text?: unknown; pos?: unknown; png?: unknown } | null
+  if (!c || typeof c !== 'object') return undefined
+  const text = String(c.text ?? '').trim().slice(0, 80)
+  if (!text || typeof c.png !== 'string' || c.png.length > 600_000) return undefined
+  const png = Buffer.from(c.png, 'base64')
+  if (png.length < 24 || !png.subarray(0, 8).equals(PNG_SIG) || png.readUInt32BE(16) !== 512 || png.readUInt32BE(20) !== 512) return undefined
+  const id = crypto.createHash('sha256').update(png).digest('hex')
+  const file = path.join(CAPTIONS, `${id}.png`)
+  if (!fs.existsSync(file)) fs.writeFileSync(file, png)
+  return { text, pos: c.pos === 'top' ? 'top' : 'bottom', id }
+}
+
+/** The caption bitmap a settings object refers to, if it is still on disk. */
+function overlayOf(s: ConvertSettings): string | null {
+  if (!s.caption || !/^[0-9a-f]{64}$/.test(s.caption.id)) return null
+  const file = path.join(CAPTIONS, `${s.caption.id}.png`)
+  return fs.existsSync(file) ? file : null
+}
+
 function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertSettings {
   const duration = rec.meta.duration
   const fit = ['cover', 'contain', 'stretch'].includes(String(body.fit)) ? body.fit as FitMode : 'cover'
@@ -257,7 +294,8 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
       padColor: /^#[0-9a-fA-F]{6}$/.test(String(body.padColor)) ? String(body.padColor) : '#000000',
       crop: sanitizeCrop(body.crop as Partial<CropRect> | null, rec.meta),
       cropPos: clampPos(body.cropPos),
-      border: !!body.border
+      border: !!body.border,
+      ...withCaption(body.caption),
     }
   }
   // Up to 8×: the editor offers it, and at 8× six sticker seconds cover 48s of source.
@@ -288,7 +326,13 @@ function parseSettings(body: Record<string, unknown>, rec: FileRecord): ConvertS
     cropPos: clampPos(body.cropPos),
     border: !!body.border,
     ...(Number(body.minQ) >= 30 ? { minQ: Math.min(70, Math.round(Number(body.minQ))) } : {}),
+    ...withCaption(body.caption),
   }
+}
+
+const withCaption = (raw: unknown): { caption?: Caption } => {
+  const caption = parseCaption(raw)
+  return caption ? { caption } : {}
 }
 
 app.post('/api/upload', reserveUpload, upload.single('file'), ah(async (req, res) => {
@@ -322,6 +366,11 @@ app.post('/api/upload', reserveUpload, upload.single('file'), ah(async (req, res
     res.status(400).json({ error: err instanceof Error ? err.message : 'Probe failed' })
   }
 }))
+
+// Link a phone: its app gets an upload-only token through the deep link the QR carries.
+app.post('/api/link', (req, res) => {
+  res.json({ link: `stickerforge://link/${linkDevice(req.userId)}` })
+})
 
 app.get('/api/files', (req, res) => {
   res.json([...files.values()].filter(f => f.owner === req.userId).map(({ path: _path, ...rest }) => rest))
@@ -466,7 +515,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
 
   const task = rec.kind === 'image'
     ? async () => {
-        const webp = await imageToAnimatedWebp({ inputPath: rec.path, outPath: outputPath, start, end, fps, fit, padColor, crop, cropPos, border })
+        const webp = await imageToAnimatedWebp({ inputPath: rec.path, outPath: outputPath, start, end, fps, fit, padColor, crop, cropPos, border, overlayPath: overlayOf(settings) })
         job.spec = specOf(webp)
         return webp
       }
@@ -478,6 +527,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
         const webp = await convertToAnimatedWebp({
           inputPath: rec.path, outPath: outputPath,
           start, end, spans, speed, fps, fit, padColor, crop, cropPos, border, minQ,
+          overlayPath: overlayOf(settings),
         }, (p, stage) => {
           job.progress = p
           job.stage = stage
@@ -502,7 +552,7 @@ function startJob(rec: FileRecord, settings: ConvertSettings, signal: AbortSigna
       return
     }
     const trayPath = path.join(TRAYS, `${jobId}.png`)
-    await extractTray(rec.path, trayPath, settings, rec.kind)
+    await extractTray(rec.path, trayPath, settings, rec.kind, overlayOf(settings))
     // A cancel/discard can arrive while the tray is extracted, when the job is still
     // 'running' — discardSticker has already dropped it from the map and disk, so
     // finishing here would resurrect a job whose output no longer exists. Read the map
@@ -583,7 +633,7 @@ app.post('/api/estimate', ah(async (req, res) => {
   estimating.add(req.userId)
   try {
     const settings = parseSettings(req.body, rec)
-    const est = await probeQueue.run(() => estimateSticker(rec.path, settings))
+    const est = await probeQueue.run(() => estimateSticker(rec.path, { ...settings, overlayPath: overlayOf(settings) }))
     res.json(est)
   } catch {
     res.json({ unknown: true })   // never block the editor on a projection failure
@@ -698,10 +748,15 @@ app.get('/api/output/webp/:jobId', (req, res) => {
   if (!job) { res.status(404).json({ error: 'Not found' }); return }
   const file = job.kind === 'image' ? job.outputPath : webpCachePath(job.id)
   if (!fs.existsSync(file)) { res.status(404).json({ error: 'Not found' }); return }
+  if (req.query.download === '1') res.attachment(downloadName(stickerView(job, files.get(job.fileId)).name, '.webp'))
   streamFile(req, res, file, 'image/webp')
 })
 
 const CODE_RE = /^[a-z0-9-]{1,32}$/
+
+// A filesystem-safe download name from a user-chosen label.
+const downloadName = (label: string, ext: string): string =>
+  (label.replace(/\.[a-z0-9]{2,4}$/i, '').replace(/[^\w\- ]+/g, '').trim().slice(0, 60) || 'sticker') + ext
 
 const ownedPack = (req: express.Request, code: string): Pack | null => {
   const p = getPack(code)
@@ -773,7 +828,7 @@ async function assemblePack(
         // Through the limiter: a build re-encoding several cache misses would otherwise
         // stack extra img2webp runs on top of the two editor encodes.
         const result = await encodeQueue.run(() => convertToAnimatedWebp({
-          inputPath: src.path, outPath, ...job.settings,
+          inputPath: src.path, outPath, ...job.settings, overlayPath: overlayOf(job.settings),
         }))
         job.spec = specOf(result)
         job.webpBytes = result.sizeBytes
@@ -787,7 +842,9 @@ async function assemblePack(
   }
 
   onProgress?.({ progress: 0.95, stage: 'Writing tray & manifest' })
-  const tray = jobList.find(j => j.trayPath && fs.existsSync(j.trayPath))
+  const hasTray = (j: Job): boolean => !!j.trayPath && fs.existsSync(j.trayPath)
+  const chosen = jobList.find(j => j.id === pack.trayJobId)
+  const tray = chosen && hasTray(chosen) ? chosen : jobList.find(hasTray)
   if (!tray) throw new Error('Tray icon missing — no sticker in the pack has one')
   fs.copyFileSync(tray.trayPath!, out('tray.png'))
 
@@ -795,7 +852,7 @@ async function assemblePack(
   const manifest = {
     identifier: pack.identifier,
     name: pack.name,
-    publisher: 'StickerForge',
+    publisher: pack.publisher,
     tray_image_file: 'tray.png',
     image_data_version: String(version),
     animated: true,
@@ -816,6 +873,8 @@ async function assemblePack(
   return { manifest, included: jobList.map(j => j.id) }
 }
 
+const signatureOf = (p: Pack): string => packSignature(p, id => jobs.get(id)?.emojis)
+
 // Summarise a pack for the list UI: how many members are finished, whether built.
 function packSummary(p: Pack) {
   const manifestFile = path.join(PACKS, p.code, 'manifest.json')
@@ -828,6 +887,10 @@ function packSummary(p: Pack) {
     code: p.code, name: p.name, jobIds: p.jobIds,
     ready: stickers.length, built,
     builtAt: built ? fs.statSync(manifestFile).mtimeMs : null,
+    // A pack built before signatures were recorded has nothing to compare against.
+    stale: built && p.builtSig != null && p.builtSig !== signatureOf(p),
+    publisher: p.publisher,
+    trayJobId: p.trayJobId,
     stickers,
   }
 }
@@ -850,13 +913,31 @@ app.post('/api/packs', (req, res) => {
   res.json(packSummary(createPack(req.userId, name)))
 })
 
+// Name, publisher and tray are each optional; whatever is sent is validated and saved.
 app.patch('/api/packs/:code', (req, res) => {
   const pack = ownedPack(req, req.params.code)
   if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
-  const name = String(req.body.name || '').slice(0, 60).trim()
-  if (!name) { res.status(400).json({ error: 'Name required' }); return }
-  renamePack(pack.code, name)
-  res.json(packSummary({ ...pack, name }))
+  const next = { ...pack }
+  if ('name' in req.body) {
+    const name = String(req.body.name || '').slice(0, 60).trim()
+    if (!name) { res.status(400).json({ error: 'Name required' }); return }
+    renamePack(pack.code, name)
+    next.name = name
+  }
+  if ('publisher' in req.body) {
+    // WhatsApp's validator caps the publisher at 128 characters.
+    const publisher = String(req.body.publisher || '').slice(0, 128).trim()
+    if (!publisher) { res.status(400).json({ error: 'Publisher required' }); return }
+    setPackPublisher(pack.code, publisher)
+    next.publisher = publisher
+  }
+  if ('trayJobId' in req.body) {
+    const id = req.body.trayJobId == null ? null : String(req.body.trayJobId)
+    if (id != null && !pack.jobIds.includes(id)) { res.status(400).json({ error: 'Tray must be a sticker in this pack' }); return }
+    setPackTray(pack.code, id)
+    next.trayJobId = id
+  }
+  res.json(packSummary(next))
 })
 
 function discardSticker(jobId: string): void {
@@ -960,6 +1041,9 @@ app.post('/api/packs/:code/build', ah(async (req, res) => {
     buildsInFlight.delete(pack.code)
   }
   const manifest = built.manifest
+  // Signed from the pack as it was when the build started: an edit made mid-build
+  // must still read as stale afterwards.
+  setBuiltSig(pack.code, signatureOf(pack))
 
   const manifestFile = path.join(PACKS, pack.code, 'manifest.json')
   if (fs.existsSync(manifestFile)) {
@@ -977,6 +1061,21 @@ app.post('/api/packs/:code/build', ah(async (req, res) => {
   emit({ done: true, code: pack.code, ...manifest })
   res.end()
 }))
+
+// The built pack as one archive, for iOS (Sticker.ly) and for keeping. Owner only:
+// the public routes serve single files to the phone and nothing else.
+app.get('/api/packs/:code/download', (req, res) => {
+  const pack = ownedPack(req, req.params.code)
+  if (!pack) { res.status(404).json({ error: 'Pack not found' }); return }
+  const dir = path.join(PACKS, pack.code)
+  const manifestFile = path.join(dir, 'manifest.json')
+  if (!fs.existsSync(manifestFile)) { res.status(404).json({ error: 'Build the pack first' }); return }
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')) as { tray_image_file: string; stickers: Array<{ image_file: string }> }
+  const names = ['manifest.json', manifest.tray_image_file, ...manifest.stickers.map(s => s.image_file)]
+  const zip = zipStore(names.map(name => ({ name, data: fs.readFileSync(path.join(dir, name)) })))
+  res.attachment(downloadName(pack.name, '.zip'))
+  res.type('application/zip').send(zip)
+})
 
 // ── public pack read (the phone; code is the capability, no auth) ─────────────
 app.get('/api/pack/:code', (req, res) => {
@@ -1014,7 +1113,7 @@ if (fs.existsSync(WEB_DIST)) {
 const PORT = Number(process.env.PORT) || 3210
 const HOST = process.env.HOST || '127.0.0.1'
 const server = app.listen(PORT, HOST, () => {
-  console.log(`StickerForge running → http://localhost:${PORT}`)
+  console.log(`StickerForge running → http://localhost:${PORT} (${ENCODE_SLOTS} encode slots)`)
 })
 
 // A deploy restarts the service mid-encode. Stop accepting, let the encode queue drain

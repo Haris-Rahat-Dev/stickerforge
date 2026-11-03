@@ -63,6 +63,8 @@ export interface ConvertSettings {
 
 export interface ConvertRequest extends ConvertSettings {
   fileId: string
+  /** Burned-in caption; `png` is the 512×512 bitmap from renderCaption(). */
+  caption?: { text: string; pos: 'top' | 'bottom'; png: string }
 }
 
 /** Live projection from /api/estimate. All fields optional — server may reply busy/unknown/image. */

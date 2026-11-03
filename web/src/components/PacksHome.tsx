@@ -7,6 +7,7 @@ export default function PacksHome({
   onRename,
   onDelete,
   onOpenStickers,
+  onLinkPhone,
   loading = false,
 }: {
   packs: PackSummary[]
@@ -17,6 +18,7 @@ export default function PacksHome({
   onRename: (code: string) => void
   onDelete: (code: string) => void
   onOpenStickers?: () => void
+  onLinkPhone?: () => void
 }) {
   if (loading) {
     return (
@@ -60,6 +62,9 @@ export default function PacksHome({
         {onOpenStickers && (
           <button className="btn btn-ghost" onClick={onOpenStickers}>All stickers</button>
         )}
+        {onLinkPhone && (
+          <button className="btn btn-ghost" onClick={onLinkPhone} title="Share clips from your phone's gallery straight into StickerForge">📱 Link phone</button>
+        )}
         <span className="switch-label">{packs.length} pack{packs.length === 1 ? '' : 's'}</span>
       </div>
       <div className="grid">
@@ -72,8 +77,11 @@ export default function PacksHome({
                     onLoad={e => e.currentTarget.classList.add('is-ready')}
                     onError={e => { e.currentTarget.classList.add('is-ready'); e.currentTarget.style.visibility = 'hidden' }} />
                 : <div className="pack-tray-empty">📦</div>}
-              <span className={`status-chip ${p.built ? 'inpack' : 'review'}`}>
-                {p.built ? '✓ Built' : 'Draft'}
+              <span
+                className={`status-chip ${p.stale ? 'encoding' : p.built ? 'inpack' : 'review'}`}
+                title={p.stale ? 'Changed since the last build — rebuild so the phone gets it' : undefined}
+              >
+                {p.stale ? '↻ Rebuild' : p.built ? '✓ Built' : 'Draft'}
               </span>
             </div>
             <div className="card-body">

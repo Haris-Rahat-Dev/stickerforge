@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import type { FileRecord, Job, MediaKind, StickerSpec } from './types.js'
+import type { FileRecord, Job, MediaKind, Pack, StickerSpec } from './types.js'
 
 export interface StickerView {
   jobId: string
@@ -22,16 +22,33 @@ export function isEditable(job: Job, source: FileRecord | undefined): boolean {
 
 export const DEFAULT_EMOJI = '😂'
 
+// One emoji: a short string with a pictograph or flag in it ("❤️", "👍🏽", "🇵🇰"), never words.
+const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u
+
 // WhatsApp accepts 1–3 emojis per sticker and rejects a manifest that breaks that.
-// Enforced here rather than only in the picker, because the route accepts arbitrary JSON.
+// Enforced here rather than only in the picker, because the route accepts arbitrary JSON
+// and the editor now takes typed emojis.
 export function normaliseEmojis(input: unknown): string[] {
   const list = Array.isArray(input) ? input : []
-  const clean = list
+  const clean = [...new Set(list
     .filter((e): e is string => typeof e === 'string')
     .map(e => e.trim())
-    .filter(e => e.length > 0)
+    .filter(e => e.length > 0 && e.length <= 16 && EMOJI.test(e)))]
     .slice(0, 3)
   return clean.length > 0 ? clean : [DEFAULT_EMOJI]
+}
+
+/**
+ * Everything a build writes into the manifest WhatsApp reads. A built pack whose current
+ * signature differs from the one stored at build time is stale: the phone has an older copy.
+ */
+export function packSignature(pack: Pick<Pack, 'name' | 'publisher' | 'trayJobId' | 'jobIds'>, emojisOf: (jobId: string) => unknown): string {
+  return JSON.stringify({
+    n: pack.name,
+    p: pack.publisher,
+    t: pack.trayJobId,
+    s: pack.jobIds.map(id => [id, normaliseEmojis(emojisOf(id))]),
+  })
 }
 
 export function stickerView(job: Job, source: FileRecord | undefined): StickerView {

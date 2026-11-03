@@ -33,6 +33,21 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="stickerforge" android:host="pack" />
             </intent-filter>
+            <!-- stickerforge://link/<token>, from "Link phone" on the web: lets this phone upload. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="stickerforge" android:host="link" />
+            </intent-filter>
+            <!-- Gallery share sheet → staging shelf on the host. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
         </activity>
 
         <provider

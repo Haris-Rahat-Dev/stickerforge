@@ -26,6 +26,8 @@ const spawnOpts = (): { signal?: AbortSignal; timeout: number; killSignal: NodeJ
 export type WebpOptions = Omit<ConvertSettings, 'speed' | 'spans'> & {
   inputPath: string
   outPath: string
+  /** 512×512 transparent PNG laid over every frame (the caption), or none. */
+  overlayPath?: string | null
   speed?: number
   spans?: Span[]
 }
@@ -230,6 +232,7 @@ interface Framing {
   padColor: string
   cropPos: number
   border: boolean
+  overlay: string | null
 }
 
 /**
@@ -243,21 +246,29 @@ function stickerChain(f: Framing, fps: number): string {
 }
 
 /**
- * Input and filter arguments for the kept spans. One span seeks with -ss/-t. Several
- * seek to just before the first and trim relative to that point, so a cut at 50s no
- * longer decodes the first 50s of the source on every probe and encode.
+ * Input and filter arguments for the kept spans, framed as the sticker at `fps`, with the
+ * caption laid on top, then `after` (e.g. a fingerprint downscale). One span seeks with
+ * -ss/-t. Several seek to just before the first and trim relative to that point, so a cut
+ * at 50s no longer decodes the first 50s of the source on every probe and encode.
  */
-function sourceArgs(inputPath: string, spans: Span[], chain: string): string[] {
+function sourceArgs(inputPath: string, spans: Span[], f: Framing, fps: number, after = ''): string[] {
+  const chain = stickerChain(f, fps)
+  const tail = after ? `,${after}` : ''
+  // The caption is the second input; overlay repeats its single frame over the whole clip.
+  const cap = f.overlay ? [...SAFE_INPUT, '-i', f.overlay] : []
+  const top = (graph: string): string => f.overlay ? `${graph}[s];[s][1:v]overlay=0:0${tail}[out]` : `${graph}${tail}[out]`
   if (spans.length < 2) {
     const s = spans[0]
-    return ['-ss', String(s.start), '-t', String(Math.max(0.1, s.end - s.start)), ...SAFE_INPUT, '-i', inputPath, '-vf', chain]
+    const head = ['-ss', String(s.start), '-t', String(Math.max(0.1, s.end - s.start)), ...SAFE_INPUT, '-i', inputPath]
+    if (!f.overlay) return [...head, '-vf', chain + tail]
+    return [...head, ...cap, '-filter_complex', top(`[0:v]${chain}`), '-map', '[out]']
   }
   const offset = Math.max(0, spans[0].start - 1)
   const until = spans[spans.length - 1].end - offset + 0.5
   // A concat references [0:v] once per span, which a simple -vf graph rejects.
   return [
-    '-ss', String(offset), '-t', String(until), ...SAFE_INPUT, '-i', inputPath,
-    '-filter_complex', `${concatPrefix(spans, offset)}${chain}[out]`, '-map', '[out]',
+    '-ss', String(offset), '-t', String(until), ...SAFE_INPUT, '-i', inputPath, ...cap,
+    '-filter_complex', top(`${concatPrefix(spans, offset)}${chain}`), '-map', '[out]',
   ]
 }
 
@@ -267,9 +278,8 @@ function sourceArgs(inputPath: string, spans: Span[], chain: string): string[] {
  */
 async function probeHoldCount(inputPath: string, spans: Span[], f: Framing, fps: number, tmp: string): Promise<number> {
   const raw = path.join(tmp, `probe-${Math.round(fps * 100)}.gray`)
-  const chain = `${stickerChain(f, fps)},scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`
   try {
-    await run('ffmpeg', [...sourceArgs(inputPath, spans, chain), '-f', 'rawvideo', '-y', raw])
+    await run('ffmpeg', [...sourceArgs(inputPath, spans, f, fps, `scale=${SIG_SIDE}:${SIG_SIDE}:flags=area,format=gray`), '-f', 'rawvideo', '-y', raw])
   } catch {
     return 0
   }
@@ -308,8 +318,7 @@ async function sampleFrameCost(
   await mkdir(dir, { recursive: true })
   try {
     await run('ffmpeg', [
-      '-ss', String(from), '-t', String(Math.max(0.1, srcSec)), ...SAFE_INPUT, '-i', inputPath,
-      '-vf', stickerChain(f, fps),
+      ...sourceArgs(inputPath, [{ start: from, end: from + Math.max(0.1, srcSec) }], f, fps),
       // Temp frames: zlib level 1 halves extraction time; img2webp reads them once.
       '-compression_level', '1', path.join(dir, 'f%04d.png'),
     ])
@@ -369,7 +378,7 @@ async function cachedTier(inputPath: string, spans: Span[], f: Framing, fps: num
  * an animated pack).
  */
 export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult> {
-  const { inputPath, outPath, fit, padColor, crop, cropPos, border } = opts
+  const { inputPath, outPath, fit, padColor, crop, cropPos, border, overlayPath } = opts
   const tmp = fs_mkdtemp()
   await mkdir(tmp, { recursive: true })
   try {
@@ -377,7 +386,10 @@ export async function imageToAnimatedWebp(opts: WebpOptions): Promise<WebpResult
     const filters = buildFilters(fit, padColor, cropPos, border)
     const png = path.join(tmp, 'f.png')
     const webp = path.join(tmp, 'f.webp')
-    await run('ffmpeg', ['-y', ...SAFE_INPUT, '-i', inputPath, '-vf', `${cropF}${filters}`, '-frames:v', '1', png])
+    const frame = overlayPath
+      ? [...SAFE_INPUT, '-i', overlayPath, '-filter_complex', `[0:v]${cropF}${filters}[s];[s][1:v]overlay=0:0[out]`, '-map', '[out]']
+      : ['-vf', `${cropF}${filters}`]
+    await run('ffmpeg', ['-y', ...SAFE_INPUT, '-i', inputPath, ...frame, '-frames:v', '1', png])
     for (const q of [90, 75, 60, 45]) {
       await run('cwebp', [png, '-q', String(q), '-quiet', '-o', webp])
       await run('webpmux', ['-frame', webp, '+250', '-frame', webp, '+250', '-loop', '0', '-o', outPath])
@@ -408,9 +420,10 @@ function qualityLabel(q: number): EstimateResult['quality'] {
   return 'very soft'
 }
 
-const framingOf = (o: Pick<ConvertSettings, 'crop' | 'fit' | 'padColor' | 'cropPos' | 'border'> & { speed?: number }): Framing => ({
+const framingOf = (o: Pick<ConvertSettings, 'crop' | 'fit' | 'padColor' | 'cropPos' | 'border'> & { speed?: number; overlayPath?: string | null }): Framing => ({
   speed: o.speed && o.speed > 0 ? o.speed : 1,
   crop: o.crop, fit: o.fit, padColor: o.padColor, cropPos: o.cropPos, border: o.border,
+  overlay: o.overlayPath ?? null,
 })
 
 /**
@@ -419,7 +432,7 @@ const framingOf = (o: Pick<ConvertSettings, 'crop' | 'fit' | 'padColor' | 'cropP
  * quality shown are the ones the encode lands on. An estimate, not a guarantee — the
  * real encode still fails closed at WEBP_TARGET.
  */
-export async function estimateSticker(inputPath: string, opts: ConvertSettings): Promise<EstimateResult> {
+export async function estimateSticker(inputPath: string, opts: ConvertSettings & { overlayPath?: string | null }): Promise<EstimateResult> {
   const spans = opts.spans && opts.spans.length ? opts.spans : [{ start: opts.start, end: opts.end }]
   const kept = keptSeconds(spans)
   const framing = framingOf(opts)
@@ -518,7 +531,7 @@ export async function convertToAnimatedWebp(
       progress?.(base, `Extracting ${Math.round(outFps)}fps frames`)
       await runWithProgress('ffmpeg', [
         '-progress', 'pipe:1', '-nostats',
-        ...sourceArgs(inputPath, spans, stickerChain(framing, outFps)),
+        ...sourceArgs(inputPath, spans, framing, outFps),
         '-compression_level', '1', `${framesDir}/f%04d.png`,
       ], f => progress?.(base + f * span * 0.5, `Extracting ${Math.round(outFps)}fps frames`), outDur)
 

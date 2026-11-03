@@ -21,6 +21,7 @@ import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -37,6 +38,7 @@ public class MainActivity extends AppCompatActivity
     private static final String EXTRA_PACK_NAME = "sticker_pack_name";
     private static final String DEEP_LINK_SCHEME = "stickerforge";
     private static final String PREF_CODE = "code";
+    private static final String PREF_DEVICE = "device";
 
     private SharedPreferences prefs;
     private PackLoader loader;
@@ -105,6 +107,7 @@ public class MainActivity extends AppCompatActivity
         addBtn.setOnClickListener(v -> addToWhatsApp());
 
         handleDeepLink(getIntent());
+        handleShare(getIntent());
     }
 
     @Override
@@ -127,6 +130,7 @@ public class MainActivity extends AppCompatActivity
         super.onNewIntent(intent);
         setIntent(intent);
         handleDeepLink(intent);
+        handleShare(intent);
     }
 
     private void bindViews() {
@@ -463,12 +467,76 @@ public class MainActivity extends AppCompatActivity
     private void handleDeepLink(Intent intent) {
         Uri data = intent != null ? intent.getData() : null;
         if (data == null || !DEEP_LINK_SCHEME.equals(data.getScheme())) return;
+        if ("link".equals(data.getHost())) {
+            String token = data.getLastPathSegment();
+            if (token == null || token.isEmpty()) return;
+            prefs.edit().putString(PREF_DEVICE, token).apply();
+            Toast.makeText(this, R.string.link_saved, Toast.LENGTH_LONG).show();
+            return;
+        }
         List<String> segments = data.getPathSegments();
         String code = !segments.isEmpty() ? segments.get(segments.size() - 1) : data.getHost();
         if (code != null && !code.isEmpty() && !"pack".equals(code)) {
             codeInput.setText(code);
             startLoad();
         }
+    }
+
+    // ── share sheet: gallery → staging shelf on the host ─────────────────
+
+    @SuppressWarnings("deprecation") // typed getParcelable*Extra is API 33+
+    private void handleShare(Intent intent) {
+        if (intent == null) return;
+        List<Uri> uris = new ArrayList<>();
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            Uri one = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (one != null) uris.add(one);
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+            ArrayList<Uri> many = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (many != null) uris.addAll(many);
+        } else {
+            return;
+        }
+        // Handled once: a rotation or relaunch must not upload the same clips again.
+        setIntent(new Intent(this, MainActivity.class));
+        if (uris.isEmpty()) return;
+        String token = prefs.getString(PREF_DEVICE, null);
+        if (token == null) {
+            showShareStatus(R.drawable.ic_alert, R.color.sf_red, getString(R.string.share_not_linked));
+            return;
+        }
+        showShareStatus(R.drawable.ic_download, R.color.sf_ink, getString(R.string.share_uploading, 1, uris.size()));
+        new Thread(() -> {
+            int sent = 0;
+            String failure = null;
+            for (int i = 0; i < uris.size(); i++) {
+                final int n = i + 1;
+                runOnUiThread(() -> statusText.setText(getString(R.string.share_uploading, n, uris.size())));
+                try {
+                    ShareUploader.upload(getContentResolver(), uris.get(i), token);
+                    sent++;
+                } catch (ShareUploader.NotLinked e) {
+                    failure = getString(R.string.share_not_linked);
+                    break;
+                } catch (Exception e) {
+                    failure = getString(R.string.share_failed, e.getMessage());
+                }
+            }
+            final int done = sent;
+            final String error = failure;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (error == null) showShareStatus(R.drawable.ic_check, R.color.sf_green, getString(R.string.share_done, done));
+                else showShareStatus(R.drawable.ic_alert, R.color.sf_red, error);
+                Toast.makeText(this, error == null ? getString(R.string.share_done, done) : error, Toast.LENGTH_LONG).show();
+            });
+        }).start();
+    }
+
+    private void showShareStatus(int icon, int textColor, String text) {
+        statusIcon.setImageResource(icon);
+        statusText.setTextColor(color(textColor));
+        statusText.setText(text);
     }
 
     private int color(int res) {

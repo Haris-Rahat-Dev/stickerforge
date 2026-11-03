@@ -58,6 +58,7 @@ export function initDb(dataDir: string): void {
       code TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
       identifier TEXT NOT NULL, version INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS device_links (hash TEXT PRIMARY KEY, owner TEXT NOT NULL, created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS pack_stickers (
       code TEXT NOT NULL, position INTEGER NOT NULL, job_id TEXT NOT NULL,
       PRIMARY KEY (code, position)
@@ -66,7 +67,10 @@ export function initDb(dataDir: string): void {
   // Migrate a pre-multi-user packs table (had only code/identifier/version).
   for (const col of [
     "owner TEXT NOT NULL DEFAULT 'legacy'",
-    "name TEXT NOT NULL DEFAULT 'StickerForge Pack'"
+    "name TEXT NOT NULL DEFAULT 'StickerForge Pack'",
+    "publisher TEXT NOT NULL DEFAULT 'StickerForge'",
+    'tray_job TEXT',
+    'built_sig TEXT',
   ]) {
     try { db.exec(`ALTER TABLE packs ADD COLUMN ${col}`) } catch { /* column already exists */ }
   }
@@ -159,17 +163,20 @@ function readStickers(code: string): string[] {
   return db!.prepare('SELECT job_id FROM pack_stickers WHERE code = ? ORDER BY position').all(code)
     .map(r => (r as { job_id: string }).job_id)
 }
-function rowToPack(row: { code: string; owner: string; name: string; identifier: string; version: number }): Pack {
-  return { ...row, jobIds: readStickers(row.code) }
+type PackRow = {
+  code: string; owner: string; name: string; identifier: string; version: number
+  publisher: string; tray_job: string | null; built_sig: string | null
 }
-type PackRow = { code: string; owner: string; name: string; identifier: string; version: number }
+function rowToPack({ tray_job, built_sig, ...row }: PackRow): Pack {
+  return { ...row, trayJobId: tray_job, builtSig: built_sig, jobIds: readStickers(row.code) }
+}
 
 export function createPack(owner: string, name: string): Pack {
   const code = crypto.randomBytes(6).toString('hex')          // 12-char unguessable capability
   const identifier = `stickerforge-${code}`
   db!.prepare('INSERT INTO packs (code, owner, name, identifier, version) VALUES (?, ?, ?, ?, 0)')
     .run(code, owner, name, identifier)
-  return { code, owner, name, identifier, version: 0, jobIds: [] }
+  return { code, owner, name, identifier, version: 0, jobIds: [], publisher: 'StickerForge', trayJobId: null, builtSig: null }
 }
 
 export function getPack(code: string): Pack | null {
@@ -187,6 +194,18 @@ export function listPacks(owner: string): Pack[] {
 
 export function renamePack(code: string, name: string): void {
   db!.prepare('UPDATE packs SET name = ? WHERE code = ?').run(name, code)
+}
+
+export function setPackPublisher(code: string, publisher: string): void {
+  db!.prepare('UPDATE packs SET publisher = ? WHERE code = ?').run(publisher, code)
+}
+
+export function setPackTray(code: string, jobId: string | null): void {
+  db!.prepare('UPDATE packs SET tray_job = ? WHERE code = ?').run(jobId, code)
+}
+
+export function setBuiltSig(code: string, sig: string): void {
+  db!.prepare('UPDATE packs SET built_sig = ? WHERE code = ?').run(sig, code)
 }
 
 export function bumpPackVersion(code: string): number {
@@ -220,4 +239,23 @@ export function countPacksWithJob(jobId: string): number {
 
 export function removeJobFromAllPacks(jobId: string): void {
   db!.prepare('DELETE FROM pack_stickers WHERE job_id = ?').run(jobId)
+}
+
+// ── linked phones ────────────────────────────────────────────────────────────
+// A linked phone holds a random token; only its sha256 is stored. Linking again replaces
+// the previous phone's token, which is how a lost phone is revoked.
+const hashToken = (token: string): string => crypto.createHash('sha256').update(token).digest('hex')
+
+export function linkDevice(owner: string): string {
+  const token = crypto.randomBytes(24).toString('base64url')
+  tx(() => {
+    db!.prepare('DELETE FROM device_links WHERE owner = ?').run(owner)
+    db!.prepare('INSERT INTO device_links (hash, owner, created) VALUES (?, ?, ?)').run(hashToken(token), owner, Date.now())
+  })
+  return token
+}
+
+export function deviceOwner(token: string): string | null {
+  const row = db!.prepare('SELECT owner FROM device_links WHERE hash = ?').get(hashToken(token)) as { owner: string } | undefined
+  return row?.owner ?? null
 }

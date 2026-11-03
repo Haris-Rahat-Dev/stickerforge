@@ -25,17 +25,22 @@ export function buildFilters(fit: FitMode, padColor = '#000000', cropPos = 0.5, 
  * opening frames, so a fade-in or a black first frame doesn't become the pack's icon.
  * A still has no timeline for `fps` to sample, so it is framed as-is.
  */
-export function extractTray(inputPath: string, trayPath: string, s: ConvertSettings, kind: MediaKind): Promise<void> {
+export function extractTray(inputPath: string, trayPath: string, s: ConvertSettings, kind: MediaKind, overlayPath: string | null = null): Promise<void> {
   const first = s.spans[0] ?? { start: s.start, end: s.end }
   const look = Math.max(0.1, Math.min(3, first.end - first.start))
   const pick = kind === 'video' ? 'fps=10,thumbnail=30,' : ''
   const cropF = s.crop ? `crop=${s.crop.w}:${s.crop.h}:${s.crop.x}:${s.crop.y},` : ''
+  const framed = `${pick}${cropF}${buildFilters(s.fit, s.padColor, s.cropPos, s.border)}`
+  // The tray is the sticker as it ships, so the caption is on it too.
+  const filter = overlayPath
+    ? [...SAFE_INPUT, '-i', overlayPath, '-filter_complex', `[0:v]${framed}[s];[s][1:v]overlay=0:0,scale=96:96:flags=lanczos[out]`, '-map', '[out]']
+    : ['-vf', `${framed},scale=96:96:flags=lanczos`]
   return new Promise((resolve) => {
     const p = spawn('ffmpeg', [
       '-ss', String(Math.max(0, first.start)), '-t', String(look),
       ...SAFE_INPUT,
       '-i', inputPath,
-      '-vf', `${pick}${cropF}${buildFilters(s.fit, s.padColor, s.cropPos, s.border)},scale=96:96:flags=lanczos`,
+      ...filter,
       '-frames:v', '1', '-y', trayPath,
     ], { timeout: 60_000, killSignal: 'SIGKILL' })
     p.on('close', () => resolve())

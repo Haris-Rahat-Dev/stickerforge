@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import type { PackManifest } from '../api.js'
+import { packDownloadUrl, type PackManifest } from '../api.js'
 import type { StickerView } from '../types.js'
 import { PackVerdict } from './StickerSpec.jsx'
 
@@ -70,6 +70,10 @@ export default function InstallDrawer({
               <li>Tap <b>Load pack</b>, then <b>Add to WhatsApp</b>.</li>
             </ol>
             <p className="handoff-note">Phone fetches the pack from the StickerForge server over Tailscale (same account).</p>
+            <p className="handoff-note">
+              iPhone or keeping a copy? <a href={packDownloadUrl(manifest.code)} download>⬇ Download the pack (.zip)</a> — the
+              stickers are standard animated WebP.
+            </p>
           </div>
         </div>
       </aside>

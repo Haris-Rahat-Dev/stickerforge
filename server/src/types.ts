@@ -53,6 +53,18 @@ export interface ConvertSettings {
    * 4s at q30 had frames at SSIM 0.80 (visibly blocky) where trimming would have been clean.
    */
   minQ?: number
+  /**
+   * Caption burned over the sticker. The browser renders it to a 512×512 transparent PNG
+   * — the same pixels its preview shows — stored once under data/captions/<id>.png.
+   */
+  caption?: Caption
+}
+
+export interface Caption {
+  text: string
+  pos: 'top' | 'bottom'
+  /** sha256 of the PNG; the file is data/captions/<id>.png. */
+  id: string
 }
 
 export type MediaKind = 'video' | 'image'
@@ -76,6 +88,12 @@ export interface Pack {
   identifier: string
   version: number
   jobIds: string[]   // ordered membership (one job per sticker)
+  /** Shown under the pack name in WhatsApp. */
+  publisher: string
+  /** The sticker whose frame is the pack's tray icon; null = the first one that has a tray. */
+  trayJobId: string | null
+  /** packSignature() at the last successful build; null = never built since tracking began. */
+  builtSig: string | null
 }
 
 export type JobStatus = 'running' | 'done' | 'error' | 'cancelled'

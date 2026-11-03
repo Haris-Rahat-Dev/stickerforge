@@ -1,10 +1,10 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { videoUrl } from '../api.js'
 import type { FileRecord, UploadProgress } from '../types.js'
 
 const QUALITY: Record<string, string> = { good: '✓ Great', ok: '~ Usable', warn: '! Rough' }
 
-export default function StagingShelf({ staged, uploading, encoding, errors, onEdit, onDiscard, loading = false }: {
+export default function StagingShelf({ staged, uploading, encoding, errors, onEdit, onDiscard, onAddAll, batching = false, loading = false }: {
   staged: FileRecord[]
   /** No cached uploads yet: hold the shelf's place so the sheet doesn't jump. */
   loading?: boolean
@@ -13,6 +13,9 @@ export default function StagingShelf({ staged, uploading, encoding, errors, onEd
   errors: Record<string, string>
   onEdit: (fileId: string) => void
   onDiscard: (fileId: string) => void
+  /** Encode every staged source with the Short preset and drop each onto the sheet. */
+  onAddAll?: () => void
+  batching?: boolean
 }) {
   // The shelf's existence IS the "unfinished work" signal. Empty means everything
   // is filed, so it collapses to nothing rather than showing an empty state.
@@ -37,6 +40,14 @@ export default function StagingShelf({ staged, uploading, encoding, errors, onEd
     <section className="shelf">
       <div className="shelf-label">
         Staging · {staged.length + uploading.length} not in the pack yet
+        {onAddAll && staged.length > 0 && (
+          <button
+            className="btn btn-primary btn-sm shelf-addall"
+            disabled={batching}
+            onClick={onAddAll}
+            title="Encode each clip with the Short preset and add it to the pack — open any one to tweak it instead"
+          >{batching ? 'Adding…' : `⚡ Add all as Short (${staged.length})`}</button>
+        )}
       </div>
       <div className="shelf-rail">
         {staged.map(f => (
@@ -73,6 +84,7 @@ function ShelfCard({ file, progress, error, onEdit, onDiscard }: {
   onDiscard: () => void
 }) {
   const vid = useRef<HTMLVideoElement>(null)
+  const [why, setWhy] = useState(false)
   return (
     <div className="shelf-card">
       <div className="thumb square" onClick={onEdit} title="Edit and add to the pack">
@@ -91,7 +103,13 @@ function ShelfCard({ file, progress, error, onEdit, onDiscard }: {
               onMouseEnter={() => vid.current?.play().catch(() => {})}
               onMouseLeave={() => { const v = vid.current; if (v) { v.pause(); v.currentTime = 0.1 } }}
             />}
-        <span className={`chip chip-${file.quality.level}`}>{QUALITY[file.quality.level]}</span>
+        <button
+          type="button"
+          className={`chip chip-${file.quality.level} chip-btn`}
+          aria-expanded={why}
+          title="Why?"
+          onClick={e => { e.stopPropagation(); setWhy(!why) }}
+        >{QUALITY[file.quality.level]} ⓘ</button>
         {progress != null && (
           <div className="thumb-progress">
             <div className="progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} />
@@ -106,8 +124,15 @@ function ShelfCard({ file, progress, error, onEdit, onDiscard }: {
         </button>
       </div>
       <div className="shelf-name" title={file.originalName}>{file.originalName}</div>
+      {why && (
+        <ul className="quality-notes">
+          {file.quality.notes.map(n => <li key={n.msg} className={`note note-${n.type}`}>{n.msg}</li>)}
+        </ul>
+      )}
       {error && <div className="warn-line">✗ {error}</div>}
-      <button className="btn btn-primary btn-sm" onClick={onEdit}>Edit &amp; add</button>
+      <button className="btn btn-primary btn-sm" disabled={progress != null} onClick={onEdit}>
+        {progress != null ? `Encoding… ${Math.round(progress * 100)}%` : 'Edit & add'}
+      </button>
     </div>
   )
 }

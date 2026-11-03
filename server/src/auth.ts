@@ -13,6 +13,11 @@ const PUBLIC = [
 
 export const publicPath = (pathname: string): boolean => PUBLIC.some(re => re.test(pathname))
 
+// A linked phone (Android share sheet) authenticates with `Authorization: Device <token>`.
+// That credential reaches exactly one route: adding an upload to its owner's staging.
+export const deviceRoute = (method: string, pathname: string): boolean =>
+  method === 'POST' && pathname === '/api/upload'
+
 export type TokenVerifier = (token: string) => Promise<string>
 export type AuthMode = 'firebase' | 'cookie' | 'e2e'
 
@@ -61,7 +66,9 @@ function cookieUid(req: Request, res: Response): string {
  * sf_uid cookie so dogfood/deploy works without a Firebase project.
  * E2E sets FIREBASE_E2E_BYPASS=1 and sends Bearer e2e:<uid>.
  */
-export function createAuthMiddleware(): (req: Request, res: Response, next: NextFunction) => void {
+export function createAuthMiddleware(
+  deviceOwner: (token: string) => string | null = () => null,
+): (req: Request, res: Response, next: NextFunction) => void {
   const mode = resolveAuthMode()
 
   let verify: TokenVerifier | null = null
@@ -86,14 +93,22 @@ export function createAuthMiddleware(): (req: Request, res: Response, next: Next
   }
 
   return (req, res, next) => {
-    if (publicPath(req.baseUrl + req.path)) return next()
+    const pathname = req.baseUrl + req.path
+    if (publicPath(pathname)) return next()
+
+    const header = req.headers.authorization ?? ''
+    if (header.startsWith('Device ')) {
+      const owner = deviceRoute(req.method, pathname) ? deviceOwner(header.slice(7)) : null
+      if (!owner) return res.status(401).json({ error: 'This phone is not linked — link it again from StickerForge' })
+      req.userId = owner
+      return next()
+    }
 
     if (mode === 'cookie') {
       req.userId = cookieUid(req, res)
       return next()
     }
 
-    const header = req.headers.authorization ?? ''
     const bearer = header.startsWith('Bearer ') ? header.slice(7) : ''
     const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
     const token = bearer || queryToken

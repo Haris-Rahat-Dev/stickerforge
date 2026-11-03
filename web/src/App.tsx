@@ -13,7 +13,9 @@ import {
   listStickers,
   deleteSticker,
   setStickerEmojis,
+  updatePack,
 } from './api.js'
+import { encodeShort } from './preset.js'
 import type { FileRecord, StickerView } from './types.js'
 import type { PackSummary } from './api.js'
 import { reducer, initialState, activePack, shelfFiles } from './flow.js'
@@ -23,6 +25,7 @@ import PackCanvas from './components/PackCanvas.jsx'
 import InstallDrawer from './components/InstallDrawer.jsx'
 import StickerLibrary from './components/StickerLibrary.jsx'
 import StickerPicker from './components/StickerPicker.jsx'
+import LinkPhone from './components/LinkPhone.jsx'
 import { authRequired, signOutUser } from './auth.js'
 
 export default function App() {
@@ -31,6 +34,8 @@ export default function App() {
   const [allStickers, setAllStickers] = useState<StickerView[] | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const [batching, setBatching] = useState(false)
   const [editorTarget, setEditorTarget] = useState<{ file: FileRecord; replaceAt?: number } | null>(null)
   const replaceIndexRef = useRef<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -98,6 +103,9 @@ export default function App() {
     for (const f of list) {
       const ok = /\.(mp4|mov|webm|mkv|avi|m4v|png|jpe?g|webp|bmp|gif)$/i.test(f.name) || f.type.startsWith('video/') || f.type.startsWith('image/')
       if (!ok) continue
+      // Same name and byte size as an upload still waiting: almost certainly the same clip.
+      const twin = state.files?.find(x => x.originalName === f.name && x.sizeBytes === f.size)
+      if (twin && !confirm(`“${f.name}” is already uploaded.\n\nUpload it again anyway?`)) continue
       const key = `${f.name}-${f.size}-${Math.random().toString(36).slice(2)}`
       dispatch({ type: 'uploadStart', upload: { key, name: f.name, progress: 0 } })
       try {
@@ -116,9 +124,11 @@ export default function App() {
     }
   }
 
-  const onCommitted = async (jobId: string, _size?: number, replaceAt?: number): Promise<void> => {
+  const onCommitted = async (jobId: string, _size?: number, replaceAt?: number, emojis?: string[]): Promise<void> => {
     const code = state.activeCode
     if (!code) return
+    // Before membership, so the pack never lists the sticker with the default emoji.
+    if (emojis?.length) await setStickerEmojis(jobId, emojis).catch(() => {})
     await mutateMembership(code, ids => {
       const next = ids.filter(id => id !== jobId)
       if (replaceAt != null && replaceAt >= 0 && replaceAt <= next.length) {
@@ -192,6 +202,50 @@ export default function App() {
   const onSetEmojis = async (jobId: string, emojis: string[]): Promise<void> => {
     await setStickerEmojis(jobId, emojis)
     await Promise.all([refreshPacks(), refreshStickers()])
+  }
+
+  // Add all as Short: every staged clip through the Short preset, two at a time (the
+  // server runs two encodes at once on the small VM; more would only queue there).
+  const addAllShort = async (): Promise<void> => {
+    const code = state.activeCode
+    if (!code || batching) return
+    const queue = [...state.staged]
+    setBatching(true)
+    const worker = async (): Promise<void> => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        const file = next
+        dispatch({ type: 'encStart', fileId: file.id })
+        try {
+          const jobId = await encodeShort(file, e => dispatch({ type: 'encProgress', fileId: file.id, progress: e.progress }))
+          await mutateMembership(code, ids => [...ids, jobId])
+          dispatch({ type: 'committed', fileId: file.id })
+        } catch (err) {
+          dispatch({ type: 'encError', fileId: file.id, error: err instanceof Error ? err.message : 'Encode failed' })
+        }
+      }
+    }
+    try {
+      await Promise.all([worker(), worker()])
+    } finally {
+      setBatching(false)
+      await Promise.all([refreshPacks(), refreshStickers()])
+    }
+  }
+
+  const setPublisher = async (): Promise<void> => {
+    const pack = activePack(state)
+    if (!pack) return
+    const publisher = prompt('Publisher — shown under the pack name in WhatsApp', pack.publisher)?.trim()
+    if (!publisher || publisher === pack.publisher) return
+    await updatePack(pack.code, { publisher }).catch(err => alert(err instanceof Error ? err.message : 'Could not save'))
+    await refreshPacks()
+  }
+
+  const setTray = async (jobId: string): Promise<void> => {
+    const code = state.activeCode
+    if (!code) return
+    await updatePack(code, { trayJobId: jobId }).catch(err => alert(err instanceof Error ? err.message : 'Could not save'))
+    await refreshPacks()
   }
 
   const newPack = async (): Promise<void> => {
@@ -299,6 +353,7 @@ export default function App() {
           onRename={renamePackByCode}
           onDelete={deletePackByCode}
           onOpenStickers={() => dispatch({ type: 'openStickers' })}
+          onLinkPhone={() => setLinkOpen(true)}
         />
       )}
 
@@ -331,6 +386,11 @@ export default function App() {
           onEditStaged={onEditStaged}
           onDiscardStaged={onDiscardStaged}
           onReorder={onReorder}
+          onAddAll={() => void addAllShort()}
+          batching={batching}
+          onSetPublisher={() => void setPublisher()}
+          onSetTray={jobId => void setTray(jobId)}
+          onSetEmojis={(jobId, emojis) => void onSetEmojis(jobId, emojis)}
           onFineTune={onFineTune}
           onReplace={onReplace}
           onRemove={onRemove}
@@ -369,6 +429,8 @@ export default function App() {
           onClose={() => setPickerOpen(false)}
         />
       )}
+
+      {linkOpen && <LinkPhone onClose={() => setLinkOpen(false)} />}
 
       {dragOver && <div className="drop-overlay"><div>⬇ Drop media to import</div></div>}
       <input

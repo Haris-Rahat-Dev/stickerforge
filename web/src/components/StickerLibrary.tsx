@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import StickerPreview from './StickerPreview.jsx'
 import { SpecBadge } from './StickerSpec.jsx'
+import EmojiPicker from './EmojiPicker.jsx'
+import { stickerDownloadUrl } from '../api.js'
 import type { StickerView } from '../types.js'
 import { matchesQuery } from '../flow.js'
 
 export { matchesQuery }
-
-const PALETTE = ['😂', '🔥', '💀', '🤣', '👀', '🎬', '😭', '🫡', '❤️', '👍', '🤔', '🙃']
 
 export default function StickerLibrary({
   stickers,
@@ -97,25 +97,16 @@ export default function StickerLibrary({
                   {packs.length === 0 ? 'in no pack' : `in ${packs.join(', ')}`}
                 </div>
                 <SpecBadge spec={s.spec} />
-                {editing === s.jobId ? (
-                  <div className="emoji-picker">
-                    {PALETTE.map(e => (
-                      <button
-                        key={e}
-                        className="emoji-opt"
-                        aria-current={s.emojis.includes(e) ? 'true' : undefined}
-                        onClick={() => { onSetEmojis(s.jobId, [e]); setEditing(null) }}
-                      >
-                        {e}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="card-actions">
-                    <button className="btn btn-ghost btn-sm" onClick={() => setEditing(s.jobId)}>Emoji</button>
-                    <button className="btn btn-ghost btn-sm" onClick={() => onDelete(s)}>Delete</button>
-                  </div>
+                {editing === s.jobId && (
+                  <EmojiPicker value={s.emojis} onChange={e => { if (e.length) onSetEmojis(s.jobId, e) }} />
                 )}
+                <div className="card-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => setEditing(editing === s.jobId ? null : s.jobId)}>
+                    {editing === s.jobId ? 'Done' : 'Emoji'}
+                  </button>
+                  <a className="btn btn-ghost btn-sm" href={stickerDownloadUrl(s.jobId)} download title="Download this sticker (.webp)">⬇</a>
+                  <button className="btn btn-ghost btn-sm" onClick={() => onDelete(s)}>Delete</button>
+                </div>
               </div>
             </div>
           )

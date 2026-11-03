@@ -2,15 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { videoUrl, filmstripUrl, convert, detectCrop, watchJob, estimate, discardDraft, EncodeError, planSeams, type SeamLabel, type SeamPlan } from '../api.js'
 import type { ConvertRequest, CropRect, EstimateResult, FileRecord, FitMode, StickerSpec } from '../types.js'
 import { capFps, fpsChoices, MAX_STICKER_SEC, nextFitLength } from '../budget.js'
+import { FIT_ATTEMPTS, LONG_FPS, fitPresetLength, needsFraming as framingNeeded, presetRequest, squareCrop } from '../preset.js'
+import { renderCaption, type CaptionArt, type CaptionPos } from '../caption.js'
+import EmojiPicker from './EmojiPicker.jsx'
 import { keptSeconds, normalizeSpans, splitAt, type Span } from '../spans.js'
 import Timeline, { clock, sourceTimeAt } from './Timeline.jsx'
 import StickerPreview from './StickerPreview.jsx'
 import { SpecTable } from './StickerSpec.jsx'
-
-function squareCrop(w: number, h: number): CropRect {
-  const s = Math.min(w, h)
-  return { w: s, h: s, x: Math.round((w - s) / 2), y: Math.round((h - s) / 2) }
-}
 
 function squareInside(r: CropRect): CropRect {
   const s = Math.min(r.w, r.h)
@@ -22,10 +20,7 @@ function squareInside(r: CropRect): CropRect {
  * keeps ~60–90% more seconds. Custom: the full editor, previewed after generating.
  */
 export type EditorMode = 'short' | 'long' | 'custom'
-const LONG_FPS = 15
 const SPEEDS = [1, 1.25, 1.5, 2, 3, 4, 6, 8]
-/** Budget failures shrink the preset window to what the encoder measured would fit. */
-const FIT_ATTEMPTS = 3
 
 /** Identity of an encode's settings, so a result can tell when the editor has moved on. */
 /**
@@ -51,14 +46,14 @@ export default function Editor({
   file: FileRecord
   replaceAt?: number
   onClose: () => void
-  onAddedToPack?: (jobId: string, sizeBytes?: number, replaceAt?: number) => void
+  onAddedToPack?: (jobId: string, sizeBytes?: number, replaceAt?: number, emojis?: string[]) => void
 }) {
   const meta = file.meta
   const duration = Math.max(meta.duration, 0.5)
   const sourceFps = capFps(meta.fps)
   const choices = fpsChoices(meta.fps)
   const isImage = file.kind === 'image'
-  const needsFraming = Math.abs(meta.width / meta.height - 1) > 0.02
+  const needsFraming = framingNeeded(file)
   // A source already at or under 15fps has nothing for Long to trade.
   const offerLong = sourceFps > LONG_FPS
 
@@ -76,6 +71,13 @@ export default function Editor({
   // Playback speed. Measured: 4s of busy source at 2× fits at q70 (worst frame 0.987)
   // where the same 4s at 1× needs the blocky q30 — half the frames, same moment.
   const [speed, setSpeed] = useState(1)
+
+  const [emojis, setEmojis] = useState<string[]>(['😂'])
+  // Caption: typed text and position; `caption` is the rendered bitmap that both the
+  // preview and the encode use, re-rendered when the text, position or border changes.
+  const [captionText, setCaptionText] = useState('')
+  const [captionPos, setCaptionPos] = useState<CaptionPos>('bottom')
+  const [caption, setCaption] = useState<CaptionArt | null>(null)
 
   const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState<{ progress: number; stage: string } | null>(null)
@@ -114,17 +116,13 @@ export default function Editor({
   const spansRef = useRef(activeSpans)
   spansRef.current = activeSpans
 
-  const presetReq = (m: EditorMode, start: number, len: number): ConvertRequest => ({
-    fileId: file.id, start, end: start + len, spans: [{ start, end: start + len }],
-    speed: 1, fps: presetFps(m), fit: needsFraming ? 'contain' : 'cover', padColor: '#000000',
-    crop: needsFraming ? null : squareCrop(meta.width, meta.height), cropPos: 0.5, border: false,
-    // Presets trim rather than crush: q30 turned smooth skin into visible blocks.
-    minQ: 50,
-  })
+  const presetReq = (m: EditorMode, start: number, len: number): ConvertRequest =>
+    presetRequest(file, presetFps(m), start, len)
   const fit: FitMode = pad ? 'contain' : 'cover'
   const customReq: ConvertRequest = {
     fileId: file.id, start: spans[0].start, end: spans[spans.length - 1].end, spans,
     speed, fps, fit, padColor: '#000000', crop: pad ? null : crop, cropPos: 0.5, border,
+    ...(caption ? { caption: { text: caption.text, pos: caption.pos, png: caption.png } } : {}),
   }
 
   // A result is only worth adding while it still matches what the editor shows.
@@ -191,20 +189,6 @@ export default function Editor({
     }
   }, [draftKey])
 
-  // Presets size their window with the sampled estimate before the real encode: a full
-  // encode that fails on the byte budget costs minutes on a small VM. No estimate → as is.
-  const fitPresetLength = async (m: EditorMode, start: number, len: number, ticket: number): Promise<number> => {
-    for (let i = 0; i < 3 && runRef.current === ticket; i++) {
-      const e = await estimate(presetReq(m, start, len)).catch(() => null)
-      if (e?.busy) { await new Promise(r => setTimeout(r, 500)); continue }
-      if (!e || e.fits !== false || e.maxSeconds == null) return len
-      const next = nextFitLength(len, e.maxSeconds)
-      if (next == null) return len
-      len = next
-    }
-    return len
-  }
-
   // Presets encode as soon as they're picked and whenever the window is let go.
   useEffect(() => {
     if (isImage || mode === 'custom') return
@@ -213,7 +197,11 @@ export default function Editor({
     const start = presetStart
     void (async () => {
       setBusy({ progress: 0, stage: 'sizing the clip' })
-      let len = await fitPresetLength(m, start, Math.max(0.5, Math.min(MAX_STICKER_SEC, duration - start)), ticket)
+      let len = await fitPresetLength(
+        l => presetReq(m, start, l),
+        Math.max(0.5, Math.min(MAX_STICKER_SEC, duration - start)),
+        () => runRef.current === ticket,
+      )
       for (let attempt = 1; attempt <= FIT_ATTEMPTS; attempt++) {
         if (runRef.current !== ticket) return
         setPresetLen(len)
@@ -263,7 +251,7 @@ export default function Editor({
     committedRef.current = true
     draftRef.current = null
     sessionStorage.removeItem(draftKey)
-    onAddedToPack?.(draft.jobId, draft.sizeBytes, replaceAt)
+    onAddedToPack?.(draft.jobId, draft.sizeBytes, replaceAt, emojis)
   }
 
   const pickMode = (m: EditorMode): void => {
@@ -346,8 +334,17 @@ export default function Editor({
     return () => clearInterval(id)
   }, [showingSticker, stickerDur])
 
+  // The caption bitmap follows the text, position and border (the border moves the safe area).
+  useEffect(() => {
+    let live = true
+    const t = setTimeout(() => {
+      void renderCaption(captionText, captionPos, border).then(art => { if (live) setCaption(art) })
+    }, 200)
+    return () => { live = false; clearTimeout(t) }
+  }, [captionText, captionPos, border])
+
   // Live projection — Custom only. Presets measure the real encode instead.
-  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps, v: speed })
+  const estKey = JSON.stringify({ s: spans, c: pad ? null : crop, b: border, p: pad, f: fps, v: speed, t: caption?.url.length && `${caption.text}|${caption.pos}` })
   useEffect(() => {
     if (isImage || mode !== 'custom') return
     const ctrl = new AbortController()
@@ -579,12 +576,14 @@ export default function Editor({
               <button className={`seg-btn ${showSource ? 'active' : ''}`} onClick={() => setShowSource(true)}>Source</button>
             </div>
           )}
-          <div className="stage-outer" style={!showingSticker && mode === 'custom' && border ? { background: '#ffffff', padding: '5.08%' } : undefined}>
+          <div className="stage-outer" style={{ position: 'relative', ...(!showingSticker && mode === 'custom' && border ? { background: '#ffffff', padding: '5.08%' } : {}) }}>
             <div className="stage">
               {isImage
                 ? <img className="crop-full" src={videoUrl(file.id)} alt={file.originalName} />
                 : <video ref={videoRef} className="crop-full" src={videoUrl(file.id)} muted playsInline loop autoPlay />}
-              {mode === 'custom' && !pad && !showingSticker && <CropBox meta={meta} crop={crop} onChange={setCrop} />}
+              {mode === 'custom' && !pad && !showingSticker && (
+                <CropBox meta={meta} crop={crop} onChange={setCrop} overlay={caption?.url ?? null} border={border} />
+              )}
               {showingSticker && draft && (
                 <StickerPreview
                   key={draft.jobId}
@@ -602,6 +601,10 @@ export default function Editor({
                 </div>
               )}
             </div>
+            {/* Fit whole: the output square is this box, so the caption sits on it as-is. */}
+            {mode === 'custom' && pad && !showingSticker && caption && (
+              <img className="caption-overlay" src={caption.url} alt="" />
+            )}
           </div>
 
           {mode === 'custom' && !showingSticker && (
@@ -742,6 +745,35 @@ export default function Editor({
             </div>
           )}
 
+          {mode === 'custom' && (
+            <div className="fps-row">
+              <span className="ctl-label">Caption</span>
+              <div className="caption-row">
+                <input
+                  className="caption-input"
+                  maxLength={80}
+                  placeholder="meme text — optional"
+                  value={captionText}
+                  disabled={!!busy}
+                  onChange={e => setCaptionText(e.target.value)}
+                />
+                <div className="seg">
+                  {(['top', 'bottom'] as const).map(p => (
+                    <button key={p} className={`seg-btn ${captionPos === p ? 'active' : ''}`} disabled={!!busy} onClick={() => setCaptionPos(p)}>
+                      {p === 'top' ? 'Top' : 'Bottom'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <span className="fps-note">Burned into every frame, exactly as the preview shows it.</span>
+            </div>
+          )}
+
+          <div className="fps-row">
+            <span className="ctl-label">Emojis</span>
+            <EmojiPicker value={emojis} onChange={setEmojis} />
+          </div>
+
           {fresh && draft?.spec && !busy && (
             <div className="result-block">
               <span className="ctl-label">This is the real sticker</span>
@@ -843,10 +875,17 @@ export default function Editor({
 
 const clampN = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v))
 
-function CropBox({ meta, crop, onChange }: {
+// The white border shrinks the cropped picture to 460 of the sticker's 512px, so the
+// caption (drawn on the full 512) reaches 26/460 past the crop box on every side.
+const BORDER_REACH = `${(-26 / 460) * 100}%`
+const BORDER_SPAN = `${(512 / 460) * 100}%`
+
+function CropBox({ meta, crop, onChange, overlay = null, border = false }: {
   meta: { width: number; height: number }
   crop: CropRect
   onChange: (c: CropRect) => void
+  overlay?: string | null
+  border?: boolean
 }) {
   const W = meta.width, H = meta.height
   const dispW = W >= H ? 100 : (W / H) * 100
@@ -902,6 +941,14 @@ function CropBox({ meta, crop, onChange }: {
 
   return (
     <div className="cropbox" style={style} onPointerDown={drag('move')}>
+      {overlay && (
+        <img
+          className="caption-overlay"
+          src={overlay}
+          alt=""
+          style={border ? { inset: 'auto', left: BORDER_REACH, top: BORDER_REACH, width: BORDER_SPAN, height: BORDER_SPAN } : undefined}
+        />
+      )}
       {(['nw', 'ne', 'sw', 'se'] as const).map(h => (
         <span key={h} className={`crop-handle ${h}`} onPointerDown={drag(h)} />
       ))}

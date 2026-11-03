@@ -20,6 +20,11 @@
 
     <!-- status -->
     <string name="status_empty">Nothing loaded yet. Enter a pack code and pull it down.</string>
+    <string name="link_saved">Phone linked — share clips to StickerForge to stage them</string>
+    <string name="share_uploading">Uploading %1$d of %2$d…</string>
+    <string name="share_done">%1$d sent to Staging on StickerForge</string>
+    <string name="share_failed">Upload failed: %1$s</string>
+    <string name="share_not_linked">This phone isn\'t linked. On StickerForge, tap Link phone and scan the QR.</string>
     <string name="status_connecting">Reaching the StickerForge server…</string>
     <string name="status_fetching">Fetching files</string>
     <string name="status_fetching_file">Fetching %1$s</string>

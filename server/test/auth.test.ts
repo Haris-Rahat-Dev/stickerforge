@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createVerifier, publicPath, resolveAuthMode } from '../src/auth.ts'
+import type { Request, Response } from 'express'
+import { createAuthMiddleware, createVerifier, publicPath, resolveAuthMode } from '../src/auth.ts'
 
 test('accepts a verified token and returns its uid', async () => {
   const verify = createVerifier(async () => ({ uid: 'uid-abc' }))
@@ -66,4 +67,19 @@ test('resolveAuthMode: cookie when service account unset', () => {
   assert.equal(resolveAuthMode(), 'cookie')
   if (prevB !== undefined) process.env.FIREBASE_E2E_BYPASS = prevB
   if (prevS !== undefined) process.env.FIREBASE_SERVICE_ACCOUNT = prevS
+})
+
+test('a linked phone token reaches the upload route and nothing else', () => {
+  const mw = createAuthMiddleware(t => (t === 'good' ? 'owner-1' : null))
+  const call = (method: string, p: string, token: string): { status: number; uid?: string } => {
+    const req = { method, baseUrl: '/api', path: p, headers: { authorization: `Device ${token}` }, query: {} } as unknown as Request
+    let status = 200
+    const res = { status(c: number) { status = c; return this }, json() { return this }, cookie() { return this } } as unknown as Response
+    mw(req, res, () => {})
+    return { status, uid: (req as unknown as { userId?: string }).userId }
+  }
+  assert.deepEqual(call('POST', '/upload', 'good'), { status: 200, uid: 'owner-1' })
+  assert.equal(call('POST', '/upload', 'stolen').status, 401)
+  assert.equal(call('GET', '/files', 'good').status, 401)
+  assert.equal(call('POST', '/packs/abc/build', 'good').status, 401)
 })

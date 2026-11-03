@@ -137,6 +137,11 @@ export interface PackSummary {
   ready: number
   built: boolean
   builtAt?: number | null
+  /** Built, but changed since: the phone has an older copy until a rebuild. */
+  stale?: boolean
+  publisher: string
+  /** The sticker chosen as tray icon; null = the first one. */
+  trayJobId: string | null
   stickers: StickerView[]
 }
 
@@ -155,6 +160,18 @@ export const listPacks = (): Promise<PackSummary[]> => packJson('/api/packs', 'G
 export const createPack = (name: string): Promise<PackSummary> => packJson('/api/packs', 'POST', { name })
 export const renamePack = (code: string, name: string): Promise<PackSummary> => packJson(`/api/packs/${code}`, 'PATCH', { name })
 export const deletePack = (code: string): Promise<void> => packJson(`/api/packs/${code}`, 'DELETE')
+export const updatePack = (code: string, patch: { publisher?: string; trayJobId?: string | null }): Promise<PackSummary> =>
+  packJson(`/api/packs/${code}`, 'PATCH', patch)
+
+/** Deep link for the QR a phone scans to link itself for uploads. */
+export const linkPhone = (): Promise<{ link: string }> => packJson('/api/link', 'POST')
+
+// Plain links (an <a download> cannot send headers), so the token rides in the query.
+export const stickerDownloadUrl = (jobId: string): string => {
+  const q = tokenQuery()
+  return `${BASE}/api/output/webp/${jobId}${q ? `${q}&` : '?'}download=1`
+}
+export const packDownloadUrl = (code: string): string => `${BASE}/api/packs/${code}/download${tokenQuery()}`
 export const setPackStickers = (code: string, jobIds: string[]): Promise<PackSummary> => packJson(`/api/packs/${code}/stickers`, 'PUT', { jobIds })
 export const buildPack = (
   code: string,

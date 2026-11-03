@@ -1,6 +1,6 @@
 import StagingShelf from './StagingShelf.jsx'
 import StickerSheet from './StickerSheet.jsx'
-import type { PackSummary } from '../api.js'
+import { packDownloadUrl, type PackSummary } from '../api.js'
 import type { FileRecord, StickerView, UploadProgress } from '../types.js'
 
 export default function PackCanvas(props: {
@@ -20,6 +20,11 @@ export default function PackCanvas(props: {
   onEditStaged: (fileId: string) => void
   onDiscardStaged: (fileId: string) => void
   onReorder: (jobIds: string[]) => void
+  onAddAll?: () => void
+  batching?: boolean
+  onSetPublisher?: () => void
+  onSetTray?: (jobId: string) => void
+  onSetEmojis?: (jobId: string, emojis: string[]) => void
   onFineTune: (s: StickerView) => void
   onReplace: (s: StickerView) => void
   onRemove: (s: StickerView) => void
@@ -43,9 +48,17 @@ export default function PackCanvas(props: {
       <div className="toolbar canvas-bar">
         <button className="btn btn-ghost btn-sm" onClick={props.onBack}>← Packs</button>
         <button className="pack-title" onClick={props.onRename} title="Rename">{pack.name}</button>
-        <span className={`status-chip ${pack.built ? 'inpack' : 'review'}`}>
-          {pack.built ? '✓ Built' : 'Draft'}
+        <span
+          className={`status-chip ${pack.stale ? 'encoding' : pack.built ? 'inpack' : 'review'}`}
+          title={pack.stale ? 'Changed since the last build — the phone still has the old version' : undefined}
+        >
+          {pack.stale ? 'Phone out of date' : pack.built ? '✓ Built' : 'Draft'}
         </span>
+        {props.onSetPublisher && (
+          <button className="btn btn-ghost btn-sm" onClick={props.onSetPublisher} title="Shown under the pack name in WhatsApp">
+            by {pack.publisher}
+          </button>
+        )}
         <button className="btn btn-ghost" onClick={props.onAddMedia}>＋ Add media</button>
         <button className="btn btn-ghost" onClick={props.onAddExisting}>⧉ Add existing</button>
       </div>
@@ -58,11 +71,16 @@ export default function PackCanvas(props: {
         errors={props.errors}
         onEdit={props.onEditStaged}
         onDiscard={props.onDiscardStaged}
+        onAddAll={props.onAddAll}
+        batching={props.batching}
       />
 
       <StickerSheet
         stickers={pack.stickers}
         onReorder={props.onReorder}
+        trayJobId={pack.trayJobId}
+        onSetTray={props.onSetTray}
+        onSetEmojis={props.onSetEmojis}
         onFineTune={props.onFineTune}
         onReplace={props.onReplace}
         onRemove={props.onRemove}
@@ -87,8 +105,11 @@ export default function PackCanvas(props: {
         {pack.built && props.onShowInstall && !props.installOpen && (
           <button className="btn btn-ghost btn-sm" type="button" style={{ marginLeft: 8 }} onClick={() => props.onShowInstall?.()}>Show install</button>
         )}
+        {pack.built && (
+          <a className="btn btn-ghost btn-sm" href={packDownloadUrl(pack.code)} download title="The built pack as a .zip — for iOS (Sticker.ly) or keeping">⬇ .zip</a>
+        )}
         <button className="btn btn-primary" disabled={!!reason || building} onClick={props.onBuild}>
-          {building ? 'Building…' : pack.built ? '↻ Rebuild pack' : '⚡ Build pack'}
+          {building ? 'Building…' : pack.stale ? '↻ Rebuild to update phone' : pack.built ? '↻ Rebuild pack' : '⚡ Build pack'}
         </button>
       </div>
     </>
