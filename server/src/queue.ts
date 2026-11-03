@@ -1,5 +1,5 @@
 // Tiny in-process concurrency limiter — caps how many heavy encodes run at once
-// so parallel two-pass VP9 jobs don't thrash the CPU (and starve each other).
+// so parallel img2webp encodes don't thrash the CPU (and starve each other).
 // No Redis/BullMQ: this is a single-process local tool. Graduate to a real queue
 // only when the API is hosted with multiple workers.
 type Task<T> = () => Promise<T>

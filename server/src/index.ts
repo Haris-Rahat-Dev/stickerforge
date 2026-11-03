@@ -131,7 +131,7 @@ const reserveUpload: express.RequestHandler = (req, res, next) => {
 }
 
 const jobs = new Map<string, Job>()
-// Live encodes that can be stopped. A two-pass VP9 run holds a queue slot for ~90s,
+// Live encodes that can be stopped. An img2webp ladder can hold a queue slot for minutes,
 // so an abandoned tab has to be able to give it back.
 const jobAbort = new Map<string, AbortController>()
 
@@ -594,7 +594,7 @@ app.post('/api/estimate', ah(async (req, res) => {
 
 // Smooth seams: score every join — each cut between pieces and the loop back to the
 // start — and move its ends to the smoothest join in reach (`only` = one seam). Cuts
-// may grow the kept total up to 6s; the loop only trims. Also flags pieces that run
+// may grow the kept total up to the 10s cap × speed; the loop only trims. Also flags pieces that run
 // into black. Cheap: one cached 16×16 pass over the clip plus small windows per seam.
 const seamProbing = new Set<string>()
 app.post('/api/seams', ah(async (req, res) => {
@@ -737,7 +737,7 @@ async function assemblePack(
   fs.mkdirSync(stage, { recursive: true })
   const out = (name: string): string => path.join(stage, name)
 
-  // A done job's WebM is immutable, so its built WebP is deterministic — cache it
+  // A done job's settings are immutable, so its WebP is deterministic — it is cached
   // by jobId (outside packDir, which is rebuilt) so rebuilds only re-encode
   // stickers that are actually new. ponytail: no pruning; orphaned entries are tiny.
 
